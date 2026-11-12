@@ -2,6 +2,7 @@ import hashlib
 from typing import Any
 from typing import Dict
 from typing import Optional
+from typing import Tuple
 from typing import Union
 
 from ..util.color import AnsiColor
@@ -48,10 +49,16 @@ class PotentialSecret:
         self.is_secret = is_secret
         self.is_verified = is_verified
 
-        # If two PotentialSecrets have the same values for these fields,
-        # they are considered equal. Note that line numbers aren't included
-        # in this, because line numbers are subject to change.
+        # If two PotentialSecrets have the same values for these fields, they refer to the
+        # same logical secret, even if their line numbers have drifted apart. This is the
+        # identity used to match freshly scanned secrets against entries stored in older
+        # baselines (which may not even record line numbers).
         self.fields_to_compare = ['filename', 'secret_hash', 'type']
+
+    @property
+    def baseline_identity(self) -> Tuple[str, str, str]:
+        """Identifies a logical secret, independent of its (possibly drifted) line number."""
+        return tuple(getattr(self, field) for field in self.fields_to_compare)
 
     def set_secret(self, secret: str) -> None:
         self.secret_hash: str = self.hash_secret(secret)
@@ -116,21 +123,26 @@ class PotentialSecret:
         if not isinstance(other, PotentialSecret):
             return NotImplemented
 
-        return all(
+        if not all(
             getattr(self, field) == getattr(other, field)
             for field in self.fields_to_compare
-        )
+        ):
+            return False
+
+        # When we know where both occurrences live, distinct line numbers denote distinct
+        # findings (e.g. the same token pasted on two lines). A missing line number (0) means
+        # we don't know the location, so fall back to the line-agnostic baseline identity and
+        # allow matching across line drift.
+        if self.line_number and other.line_number:
+            return self.line_number == other.line_number
+
+        return True
 
     def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def __hash__(self) -> int:
-        return hash(
-            tuple(
-                getattr(self, x)
-                for x in self.fields_to_compare
-            ),
-        )
+        return hash(self.baseline_identity)
 
     def __str__(self) -> str:
         return (

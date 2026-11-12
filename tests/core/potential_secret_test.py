@@ -10,6 +10,18 @@ from testing.factories import potential_secret_factory
         (
             potential_secret_factory(line_number=1),
             potential_secret_factory(line_number=2),
+            False,
+        ),
+        (
+            # When the line number is unknown, equality falls back to the line-agnostic
+            # baseline identity (so old/slim baselines still match across line drift).
+            potential_secret_factory(line_number=0),
+            potential_secret_factory(line_number=2),
+            True,
+        ),
+        (
+            potential_secret_factory(line_number=0),
+            potential_secret_factory(line_number=0),
             True,
         ),
         (
@@ -29,6 +41,20 @@ def test_equality(a, b, is_equal):
 
     # As a sanity check that it works both ways
     assert (a != b) is not is_equal
+
+
+def test_duplicate_secrets_on_different_lines_are_distinct():
+    collection = {
+        potential_secret_factory(line_number=1),
+        potential_secret_factory(line_number=2),
+    }
+    assert len(collection) == 2
+
+
+def test_duplicate_secrets_share_a_hash_bucket():
+    assert hash(potential_secret_factory(line_number=1)) == hash(
+        potential_secret_factory(line_number=2),
+    )
 
 
 def test_secret_storage():

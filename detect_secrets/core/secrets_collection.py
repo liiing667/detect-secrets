@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 from typing import Dict
 from typing import Generator
+from typing import Iterable
 from typing import List
 from typing import Optional
 from typing import Set
@@ -103,23 +104,17 @@ class SecretsCollection:
             if filename not in self.files:
                 continue
 
-            # This allows us to obtain the same secret, by accessing the hash.
-            mapping = {
-                secret: secret
-                for secret in self.data[filename]
-            }
-
-            for old_secret in old_results.data[filename]:
-                if old_secret not in mapping:
-                    continue
-
+            for old_secret, new_secret in _pair_secrets(
+                old_results.data[filename],
+                self.data[filename],
+            ):
                 # Only override if there's no newer value.
-                if mapping[old_secret].is_secret is None:
-                    mapping[old_secret].is_secret = old_secret.is_secret
+                if new_secret.is_secret is None:
+                    new_secret.is_secret = old_secret.is_secret
 
                 # If the old value is false, it won't make a difference.
-                if not mapping[old_secret].is_verified:
-                    mapping[old_secret].is_verified = old_secret.is_verified
+                if not new_secret.is_verified:
+                    new_secret.is_verified = old_secret.is_verified
 
     def trim(
         self,
@@ -160,23 +155,20 @@ class SecretsCollection:
         else:
             fileset = set(filelist)
 
-        # Unfortunately, we can't merely do a set intersection since we want to update the line
-        # numbers (if applicable). Therefore, this does it manually.
+        # We can't merely do a set intersection: not only do we want to update the line
+        # numbers (if applicable), but duplicate occurrences of the same secret hash/type are
+        # distinct findings now. Matching therefore happens through the line-agnostic baseline
+        # identity, with line numbers used only to pair duplicates deterministically.
         result: Dict[str, Set[PotentialSecret]] = defaultdict(set)
 
         for filename in scanned_results.files:
             if filename not in self.files:
                 continue
 
-            # We construct this so we can get O(1) retrieval of secrets.
-            existing_secret_map = {secret: secret for secret in self[filename]}
-            for secret in scanned_results[filename]:
-                if secret not in existing_secret_map:
-                    continue
-
-                # Currently, we assume that the `scanned_results` have no labelled data, so
-                # we only want to obtain the latest line number from it.
-                existing_secret = existing_secret_map[secret]
+            for existing_secret, secret in _pair_secrets(
+                self[filename],
+                scanned_results[filename],
+            ):
                 if existing_secret.line_number:
                     # Only update line numbers if we're tracking them.
                     existing_secret.line_number = secret.line_number
@@ -250,36 +242,40 @@ class SecretsCollection:
             return False
 
         for filename in self.files:
-            self_mapping = {
-                (secret.secret_hash, secret.type): secret for secret in self[filename]
-            }
-            other_mapping = {
-                (secret.secret_hash, secret.type): secret for secret in other[filename]
-            }
+            self_groups = _group_by_baseline_identity(self[filename])
+            other_groups = _group_by_baseline_identity(other[filename])
 
-            # Since PotentialSecret is hashable, we compare their identities through this.
-            if set(self_mapping.values()) != set(other_mapping.values()):
+            if set(self_groups.keys()) != set(other_groups.keys()):
                 return False
 
-            if not strict:
-                continue
-
-            for secretA in self_mapping.values():
-                secretB = other_mapping[(secretA.secret_hash, secretA.type)]
-
-                valuesA = vars(secretA)
-                valuesA.pop('secret_value')
-                valuesB = vars(secretB)
-                valuesB.pop('secret_value')
-
-                if valuesA['line_number'] == 0 or valuesB['line_number'] == 0:
-                    # If line numbers are not provided (for either one), then don't compare
-                    # line numbers.
-                    valuesA.pop('line_number')
-                    valuesB.pop('line_number')
-
-                if valuesA != valuesB:
+            for identity, self_secrets in self_groups.items():
+                other_secrets = other_groups[identity]
+                if len(self_secrets) != len(other_secrets):
                     return False
+
+                if not strict:
+                    continue
+
+                # Both collections are ordered by line number in `__iter__`, so zipping them
+                # compares matching occurrences of the same logical secret.
+                ordered_pairs = zip(
+                    sorted(self_secrets, key=lambda secret: secret.line_number),
+                    sorted(other_secrets, key=lambda secret: secret.line_number),
+                )
+                for secretA, secretB in ordered_pairs:
+                    valuesA = vars(secretA)
+                    valuesA.pop('secret_value')
+                    valuesB = vars(secretB)
+                    valuesB.pop('secret_value')
+
+                    if valuesA['line_number'] == 0 or valuesB['line_number'] == 0:
+                        # If line numbers are not provided (for either one), then don't compare
+                        # line numbers.
+                        valuesA.pop('line_number')
+                        valuesB.pop('line_number')
+
+                    if valuesA != valuesB:
+                        return False
 
         return True
 
@@ -287,7 +283,13 @@ class SecretsCollection:
         return not self.__eq__(other)
 
     def __sub__(self, other: Any) -> 'SecretsCollection':
-        """This behaves like set subtraction."""
+        """This behaves like set subtraction.
+
+        Matching uses the line-agnostic baseline identity (filename, secret hash, type), so a
+        secret that merely moved to another line is not reported as new. When a secret occurs on
+        multiple lines, each occurrence is consumed at most once, so an additional, unlabelled
+        occurrence is correctly reported as new.
+        """
         if not isinstance(other, SecretsCollection):
             raise NotImplementedError
 
@@ -298,7 +300,18 @@ class SecretsCollection:
             if filename not in self.files:
                 continue
 
-            output[filename] = self[filename] - other[filename]
+            matched_new_secrets = {
+                new_secret
+                for _, new_secret in _pair_secrets(
+                    other[filename],
+                    self[filename],
+                )
+            }
+            output[filename] = {
+                secret
+                for secret in self[filename]
+                if secret not in matched_new_secrets
+            }
 
         for filename in self.files:
             if filename in other.files:
@@ -316,3 +329,59 @@ class SecretsCollection:
 def _scan_file_and_serialize(filename: str) -> List[PotentialSecret]:
     """Used for multiprocessing, since lambdas can't be serialized."""
     return list(scan.scan_file(filename))
+
+
+def _group_by_baseline_identity(
+    secrets: Iterable[PotentialSecret],
+) -> Dict[Tuple[str, str, str], List[PotentialSecret]]:
+    groups: Dict[Tuple[str, str, str], List[PotentialSecret]] = defaultdict(list)
+    for secret in secrets:
+        groups[secret.baseline_identity].append(secret)
+
+    return groups
+
+
+def _pair_secrets(
+    reference: Iterable[PotentialSecret],
+    current: Iterable[PotentialSecret],
+) -> List[Tuple[PotentialSecret, PotentialSecret]]:
+    """Matches secrets across two scans of the same file, tolerating line-number drift.
+
+    Secrets are grouped by their line-agnostic baseline identity (filename, secret hash, type).
+    Within each group, occurrences sitting on the same line are paired first; any remaining
+    occurrences are paired in line order so that line drift (e.g. inserted lines) still maps
+    onto the old annotation. Unpaired secrets on either side are simply omitted.
+
+    Because every secret participates in at most one pair, labels from one occurrence never
+    leak onto a separate, duplicate occurrence of the same secret.
+    """
+    reference_groups = _group_by_baseline_identity(reference)
+    current_groups = _group_by_baseline_identity(current)
+
+    pairs: List[Tuple[PotentialSecret, PotentialSecret]] = []
+    for identity in reference_groups:
+        if identity not in current_groups:
+            continue
+
+        remaining_reference = list(reference_groups[identity])
+        remaining_current = list(current_groups[identity])
+
+        # Exact line-number matches take priority.
+        for reference_secret in list(remaining_reference):
+            for current_secret in list(remaining_current):
+                if (
+                    reference_secret.line_number
+                    and reference_secret.line_number == current_secret.line_number
+                ):
+                    pairs.append((reference_secret, current_secret))
+                    remaining_reference.remove(reference_secret)
+                    remaining_current.remove(current_secret)
+                    break
+
+        # Any leftovers are matched in line order, which handles line-number drift and
+        # baselines that don't record line numbers.
+        remaining_reference.sort(key=lambda secret: secret.line_number)
+        remaining_current.sort(key=lambda secret: secret.line_number)
+        pairs.extend(zip(remaining_reference, remaining_current))
+
+    return pairs
