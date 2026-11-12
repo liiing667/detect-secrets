@@ -343,7 +343,35 @@ class TestEqual:
         secretsB = SecretsCollection()
         secretsB[secret.filename].add(secret)
 
+        # Non-strict equality ignores line drift (historical behavior)...
         assert secretsA == secretsB
+        # ...but strict equality treats distinct lines as distinct findings.
+        assert not secretsA.exactly_equals(secretsB)
+
+    @staticmethod
+    def test_line_number_drift_still_matches_without_location():
+        secret = potential_secret_factory()
+        secretsA = SecretsCollection()
+        secretsA[secret.filename].add(secret)
+
+        # Slim baselines don't carry line numbers, so drift must still match.
+        secret = potential_secret_factory(line_number=0)
+        secretsB = SecretsCollection()
+        secretsB[secret.filename].add(secret)
+
+        assert secretsA == secretsB
+        assert not secretsA.exactly_equals(secretsB)
+
+    @staticmethod
+    def test_repeated_occurrences_count_in_strict_equality():
+        secretsA = SecretsCollection()
+        secretsA['filename'].add(potential_secret_factory(line_number=1))
+
+        secretsB = SecretsCollection()
+        secretsB['filename'].add(potential_secret_factory(line_number=1))
+        secretsB['filename'].add(potential_secret_factory(line_number=2))
+
+        assert secretsA != secretsB
         assert not secretsA.exactly_equals(secretsB)
 
 
@@ -388,3 +416,33 @@ class TestSubtraction:
 
         assert (secrets_a - secrets_b).files == {str(Path('test_data/each_secret.py'))}
         assert (secrets_b - secrets_a).files == {str(Path('test_data/config.env'))}
+
+    @staticmethod
+    def test_additional_occurrence_of_known_token_is_new_secret():
+        baseline_secrets = SecretsCollection()
+        baseline_secrets['filename'] = {
+            potential_secret_factory(line_number=1),
+            potential_secret_factory(line_number=3),
+        }
+
+        scanned = SecretsCollection()
+        scanned['filename'] = {
+            potential_secret_factory(line_number=1),
+            potential_secret_factory(line_number=2),
+            potential_secret_factory(line_number=3),
+        }
+
+        result = scanned - baseline_secrets
+        assert len(result['filename']) == 1
+        remaining = next(iter(result['filename']))
+        assert remaining.line_number == 2
+
+    @staticmethod
+    def test_slim_baseline_matches_across_line_drift():
+        baseline_secrets = SecretsCollection()
+        baseline_secrets['filename'] = {potential_secret_factory(line_number=0)}
+
+        scanned = SecretsCollection()
+        scanned['filename'] = {potential_secret_factory(line_number=5)}
+
+        assert len((scanned - baseline_secrets)['filename']) == 0

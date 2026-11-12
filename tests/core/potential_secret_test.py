@@ -9,6 +9,19 @@ from testing.factories import potential_secret_factory
     [
         (
             potential_secret_factory(line_number=1),
+            potential_secret_factory(line_number=1),
+            True,
+        ),
+        (
+            # The same token found on two distinct lines must remain distinct findings.
+            potential_secret_factory(line_number=1),
+            potential_secret_factory(line_number=2),
+            False,
+        ),
+        (
+            # An entry without a known line number (e.g. slim baseline) still matches
+            # the same secret across line drift.
+            potential_secret_factory(line_number=0),
             potential_secret_factory(line_number=2),
             True,
         ),
@@ -60,6 +73,16 @@ def test_load_secret_from_dict(kwargs):
 
     assert secret == new_secret
     assert new_secret.secret_value is None
+
+
+def test_repeated_lines_coexist_in_set():
+    findings = {
+        potential_secret_factory(line_number=1),
+        potential_secret_factory(line_number=2),
+    }
+
+    assert len(findings) == 2
+    assert {secret.line_number for secret in findings} == {1, 2}
 
 
 def test_stringify():

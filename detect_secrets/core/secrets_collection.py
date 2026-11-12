@@ -103,23 +103,9 @@ class SecretsCollection:
             if filename not in self.files:
                 continue
 
-            # This allows us to obtain the same secret, by accessing the hash.
-            mapping = {
-                secret: secret
-                for secret in self.data[filename]
-            }
-
-            for old_secret in old_results.data[filename]:
-                if old_secret not in mapping:
-                    continue
-
-                # Only override if there's no newer value.
-                if mapping[old_secret].is_secret is None:
-                    mapping[old_secret].is_secret = old_secret.is_secret
-
-                # If the old value is false, it won't make a difference.
-                if not mapping[old_secret].is_verified:
-                    mapping[old_secret].is_verified = old_secret.is_verified
+            mapping = _match_baseline_secrets(old_results.data[filename], self.data[filename])
+            for old_secret, new_secret in mapping.items():
+                _carry_over_secret_labels(old_secret, new_secret)
 
     def trim(
         self,
@@ -168,20 +154,36 @@ class SecretsCollection:
             if filename not in self.files:
                 continue
 
-            # We construct this so we can get O(1) retrieval of secrets.
-            existing_secret_map = {secret: secret for secret in self[filename]}
-            for secret in scanned_results[filename]:
-                if secret not in existing_secret_map:
-                    continue
+            # Preserve labelled baseline entries, while tracking where the same secret now
+            # lives in the freshly scanned results.
+            matched_existing_secrets: Set[PotentialSecret] = set()
+            mapping = _match_baseline_secrets(scanned_results[filename], self[filename])
+            for scanned_secret, existing_secret in mapping.items():
+                matched_existing_secrets.add(existing_secret)
 
                 # Currently, we assume that the `scanned_results` have no labelled data, so
                 # we only want to obtain the latest line number from it.
-                existing_secret = existing_secret_map[secret]
                 if existing_secret.line_number:
                     # Only update line numbers if we're tracking them.
-                    existing_secret.line_number = secret.line_number
+                    existing_secret.line_number = scanned_secret.line_number
 
                 result[filename].add(existing_secret)
+
+            # Baseline entries without an unambiguous match are kept as-is, unless the same
+            # logical secret no longer appears anywhere in the scanned file -- in that case,
+            # the secret was removed (or filtered out), so it should be trimmed away.
+            scanned_identities = {
+                secret.identity_key for secret in scanned_results[filename]
+            }
+            for existing_secret in self[filename]:
+                if existing_secret in matched_existing_secrets:
+                    continue
+
+                if existing_secret.identity_key in scanned_identities:
+                    # The secret still exists, but matching was ambiguous (e.g. it shows up
+                    # on multiple lines). Keep the labelled entry untouched, rather than
+                    # attaching its labels to the wrong occurrence.
+                    result[filename].add(existing_secret)
 
         for filename in self.files:
             # If this is already populated by scanned_results, then the set intersection
@@ -250,22 +252,32 @@ class SecretsCollection:
             return False
 
         for filename in self.files:
-            self_mapping = {
-                (secret.secret_hash, secret.type): secret for secret in self[filename]
-            }
-            other_mapping = {
-                (secret.secret_hash, secret.type): secret for secret in other[filename]
-            }
-
-            # Since PotentialSecret is hashable, we compare their identities through this.
-            if set(self_mapping.values()) != set(other_mapping.values()):
+            # Identity keys match findings across line drift, so that rescans against
+            # line-number-less (e.g. slim) baselines still compare equal. Counts matter:
+            # a token appearing twice must not be treated like a single occurrence.
+            self_identities = [secret.identity_key for secret in self[filename]]
+            other_identities = [secret.identity_key for secret in other[filename]]
+            if sorted(self_identities) != sorted(other_identities):
                 return False
 
             if not strict:
                 continue
 
-            for secretA in self_mapping.values():
-                secretB = other_mapping[(secretA.secret_hash, secretA.type)]
+            # In strict mode, distinct occurrences must line up on the same line. Match
+            # by location key (which falls back to identity key when lines are unknown).
+            self_by_location = {
+                secret.location_key: secret
+                for secret in self[filename]
+            }
+            other_by_location = {
+                secret.location_key: secret
+                for secret in other[filename]
+            }
+            if sorted(self_by_location) != sorted(other_by_location):
+                return False
+
+            for key, secretA in self_by_location.items():
+                secretB = other_by_location[key]
 
                 valuesA = vars(secretA)
                 valuesA.pop('secret_value')
@@ -298,7 +310,35 @@ class SecretsCollection:
             if filename not in self.files:
                 continue
 
-            output[filename] = self[filename] - other[filename]
+            # Exact location matches are consumed first, so that a genuinely new
+            # occurrence (on a line the baseline doesn't know about) is what gets
+            # reported. Any baseline entries left over then match by identity instead,
+            # which keeps line drift (including line-number-less slim baselines) quiet.
+            other_secrets = list(other[filename])
+            matched_other: List[PotentialSecret] = []
+            for baseline_secret in other_secrets:
+                for current_secret in self[filename]:
+                    if current_secret in matched_other:
+                        continue
+                    if current_secret.location_key == baseline_secret.location_key:
+                        matched_other.append(current_secret)
+                        break
+
+            leftover_identities = [
+                secret.identity_key
+                for secret in other_secrets
+                if secret not in matched_other
+            ]
+            remaining: List[PotentialSecret] = []
+            for secret in self[filename]:
+                if secret in matched_other:
+                    continue
+                if secret.identity_key in leftover_identities:
+                    leftover_identities.remove(secret.identity_key)
+                else:
+                    remaining.append(secret)
+
+            output[filename] = set(remaining)
 
         for filename in self.files:
             if filename in other.files:
@@ -311,6 +351,122 @@ class SecretsCollection:
     def __len__(self) -> int:
         """Returns the total number of secrets in the collection."""
         return sum(len(secrets) for secrets in self.data.values())
+
+
+def _carry_over_secret_labels(
+    old_secret: PotentialSecret,
+    new_secret: PotentialSecret,
+) -> None:
+    """Copies audit information from a baseline entry onto its rescanned counterpart."""
+    # Only override if there's no newer value.
+    if new_secret.is_secret is None:
+        new_secret.is_secret = old_secret.is_secret
+
+    # If the old value is false, it won't make a difference.
+    if not new_secret.is_verified:
+        new_secret.is_verified = old_secret.is_verified
+
+
+def _match_baseline_secrets(
+    labelled_secrets: Set[PotentialSecret],
+    current_secrets: Set[PotentialSecret],
+) -> Dict[PotentialSecret, PotentialSecret]:
+    """Pairs baseline entries up with their rescanned counterparts.
+
+    Matching happens in four passes:
+
+    1. Exact location matches (same logical secret and same known line number) are always
+       preferred, so labels never bleed across distinct occurrences of a repeated token.
+    2. Entries without a known line number (slim / adhoc baselines) may then match across
+       line drift -- but only when the match is unambiguous. When the same secret appears
+       on multiple lines, there is no safe way to tell which occurrence the label belongs
+       to, so such entries are left unmatched instead of guessing.
+    3. Labelled entries whose recorded line no longer holds (e.g. lines were inserted
+       above the secret) follow the same unambiguous single-occurrence fallback.
+    4. Identical multisets of repeated tokens that drift together are paired up in line
+       order, since each side describes the same occurrences shifted by the same offset.
+
+    :returns: mapping of ``labelled_secret -> current_secret``
+    """
+    current_by_location = {
+        secret.location_key: secret
+        for secret in current_secrets
+    }
+    current_by_identity: Dict[Tuple, List[PotentialSecret]] = defaultdict(list)
+    for secret in current_secrets:
+        current_by_identity[secret.identity_key].append(secret)
+
+    mapping: Dict[PotentialSecret, PotentialSecret] = {}
+    claimed: Set[PotentialSecret] = set()
+
+    # First pass: pin findings with known line numbers to their exact locations.
+    for labelled_secret in labelled_secrets:
+        if labelled_secret.line_number:
+            current_secret = current_by_location.get(labelled_secret.location_key)
+            if current_secret is not None:
+                mapping[labelled_secret] = current_secret
+                claimed.add(current_secret)
+
+    # Second pass: entries without a known line number (slim / adhoc baselines) may match
+    # across line drift without further checks, since they carry no location information.
+    for labelled_secret in labelled_secrets:
+        if labelled_secret in mapping or labelled_secret.line_number:
+            continue
+
+        candidates = [
+            secret
+            for secret in current_by_identity.get(labelled_secret.identity_key, [])
+            if secret not in claimed
+        ]
+        if len(candidates) == 1:
+            mapping[labelled_secret] = candidates[0]
+            claimed.add(candidates[0])
+
+    # Third pass: entries that moved to a different line (e.g. lines were inserted above
+    # them) are followed across line drift too -- but only when exactly one occurrence of
+    # the same logical secret remains unmatched. With repeated tokens, matching would be
+    # ambiguous, so the labelled entry is intentionally left untouched.
+    for labelled_secret in labelled_secrets:
+        if labelled_secret in mapping:
+            continue
+
+        candidates = [
+            secret
+            for secret in current_by_identity.get(labelled_secret.identity_key, [])
+            if secret not in claimed
+        ]
+        if len(candidates) == 1:
+            mapping[labelled_secret] = candidates[0]
+            claimed.add(candidates[0])
+
+    # Fourth pass: repeated tokens can drift as a group (e.g. a line inserted above both
+    # occurrences). When every remaining candidate is claimed by a sibling of the same
+    # logical secret, pairing the entries up in line order is unambiguous, since each side
+    # describes the same multiset of occurrences.
+    for identity_key, current_group in current_by_identity.items():
+        unlabelled_group = [
+            secret
+            for secret in labelled_secrets
+            if secret not in mapping and secret.identity_key == identity_key
+        ]
+        unclaimed_group = [
+            secret for secret in current_group if secret not in claimed
+        ]
+        if (
+            unlabelled_group
+            and all(secret.line_number for secret in unlabelled_group)
+            and all(secret.line_number for secret in unclaimed_group)
+            and len(unlabelled_group) == len(current_group)
+            and len(unclaimed_group) == len(current_group)
+        ):
+            for labelled_secret, current_secret in zip(
+                sorted(unlabelled_group, key=lambda secret: secret.line_number),
+                sorted(unclaimed_group, key=lambda secret: secret.line_number),
+            ):
+                mapping[labelled_secret] = current_secret
+                claimed.add(current_secret)
+
+    return mapping
 
 
 def _scan_file_and_serialize(filename: str) -> List[PotentialSecret]:
