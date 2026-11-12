@@ -18,6 +18,7 @@ compared to the old one).
 from typing import Any
 from typing import Dict
 from typing import Iterator
+from typing import List
 from typing import Optional
 from typing import Tuple
 from typing import Type
@@ -65,6 +66,23 @@ def _get_baseline_from_file(filename: str) -> Tuple[SecretsCollection, Dict[str,
     }
 
     return baseline.load(data, filename), config
+
+
+def _is_same_occurrence(
+    secrets: List[PotentialSecret],
+    index: int,
+    occurrence: Tuple[str, int, str],
+) -> bool:
+    try:
+        secret = secrets[index]
+    except IndexError:
+        return False
+
+    return (
+        secret.filename,
+        secret.line_number,
+        secret.secret_hash,
+    ) == occurrence
 
 
 def _compare_baselines(
@@ -137,19 +155,20 @@ def _compare_baselines(
             # At this point, they must be referencing the same secret value (not necessarily
             # same *secret*, since it could be detected by different plugins). However, since this
             # is a comparison, we're going to currently ignore if the secret values are the same.
-            old_hash = left_secret.secret_hash
-            try:
-                while old_hash == left_secrets[left_index].secret_hash:
-                    left_index += 1
-            except IndexError:
-                pass
+            #
+            # Only skip entries at this exact occurrence. Skipping by hash alone would
+            # consume the same value at a later line or in another file, hiding a real
+            # added or removed finding from the diff view.
+            occurrence = (
+                left_secret.filename,
+                left_secret.line_number,
+                left_secret.secret_hash,
+            )
+            while _is_same_occurrence(left_secrets, left_index, occurrence):
+                left_index += 1
 
-            old_hash = right_secret.secret_hash
-            try:
-                while old_hash == right_secrets[right_index].secret_hash:
-                    right_index += 1
-            except IndexError:
-                pass
+            while _is_same_occurrence(right_secrets, right_index, occurrence):
+                right_index += 1
 
         except LeftSecret:
             yield (left_secret.filename, left_secret, None)

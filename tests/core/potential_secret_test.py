@@ -10,6 +10,17 @@ from testing.factories import potential_secret_factory
         (
             potential_secret_factory(line_number=1),
             potential_secret_factory(line_number=2),
+            False,
+        ),
+        (
+            # If either location is unknown, retain line-agnostic matching.
+            potential_secret_factory(line_number=0),
+            potential_secret_factory(line_number=2),
+            True,
+        ),
+        (
+            potential_secret_factory(line_number=0),
+            potential_secret_factory(line_number=0),
             True,
         ),
         (
@@ -29,6 +40,13 @@ def test_equality(a, b, is_equal):
 
     # As a sanity check that it works both ways
     assert (a != b) is not is_equal
+
+
+def test_distinct_lines_are_distinct_occurrences():
+    assert len({
+        potential_secret_factory(line_number=1),
+        potential_secret_factory(line_number=2),
+    }) == 2
 
 
 def test_secret_storage():

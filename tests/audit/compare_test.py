@@ -45,6 +45,91 @@ def test_same_secrets_are_skipped(mock_user_decision):
 @pytest.mark.parametrize(
     'secretsA, secretsB, expected_order',
     (
+        # A matched occurrence must not consume a later same-valued occurrence.
+        (
+            [potential_secret_factory('a', line_number=1)],
+            [
+                potential_secret_factory('a', line_number=1),
+                potential_secret_factory('a', line_number=2),
+            ],
+            'R',
+        ),
+        (
+            [
+                potential_secret_factory('a', line_number=1),
+                potential_secret_factory('a', line_number=2),
+            ],
+            [potential_secret_factory('a', line_number=1)],
+            'L',
+        ),
+        # Same value across multiple files uses independent occurrence boundaries.
+        (
+            [potential_secret_factory('a', filename='a.py')],
+            [
+                potential_secret_factory('a', filename='a.py'),
+                potential_secret_factory('a', filename='b.py'),
+            ],
+            'R',
+        ),
+        (
+            [
+                potential_secret_factory('a', filename='a.py'),
+                potential_secret_factory('a', filename='b.py'),
+            ],
+            [potential_secret_factory('a', filename='a.py')],
+            'L',
+        ),
+        # Multiple same-valued occurrences with a new one in the middle.
+        (
+            [
+                potential_secret_factory('a', line_number=1),
+                potential_secret_factory('a', line_number=3),
+            ],
+            [
+                potential_secret_factory('a', line_number=1),
+                potential_secret_factory('a', line_number=2),
+                potential_secret_factory('a', line_number=3),
+            ],
+            'R',
+        ),
+    ),
+)
+def test_same_file_same_value_occurrence_boundaries(printer, secretsA, secretsB, expected_order):
+    baselineA = get_secrets(*secretsA)
+    baselineB = get_secrets(*secretsB)
+
+    with allow_fake_files():
+        run_logic(baselineA, baselineB)
+
+    assert parse_ordering(printer) == expected_order
+
+
+def test_same_location_across_plugins_is_collapsed(printer):
+    left = original_potential_secret_factory(
+        type='Plugin A',
+        filename='a.py',
+        secret='value',
+        line_number=1,
+    )
+    left.secret_hash = 'same-hash'
+
+    right = original_potential_secret_factory(
+        type='Plugin B',
+        filename='a.py',
+        secret='value',
+        line_number=1,
+    )
+    right.secret_hash = 'same-hash'
+
+    with allow_fake_files():
+        run_logic(get_secrets(left), get_secrets(right))
+
+    assert parse_ordering(printer) == ''
+
+
+@pytest.mark.parametrize(
+    'secretsA, secretsB, expected_order',
+    (
         # No secrets in one.
         (
             [],

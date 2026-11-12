@@ -64,21 +64,20 @@ hashing it with three core attributes:
 2. The filepath where it was found
 3. How the engine determined it was a secret
 
-Any potential secret that has **all three values the same is equal**.
+These three values identify the same logical secret. When two findings share them,
+their line numbers distinguish separate occurrences.
 
 This means that the engine will flag the following cases as separate occurrences
 to investigate:
 
 - Same secret value, but present in different files
 - Same secret value, caught by multiple plugins
+- The same secret value used in multiple places within the same file
 
-Furthermore, this will **not** flag on every single usage of a given secret in a
-given file, to minimize noise.
-
-**Important Note:** The line number does not play a part in the identification
-of a potential secret because code is expected to move around through continuous
-iteration. However, through the `audit` tool, these line numbers are leveraged
-to quickly identify the secret that was identified by a given plugin.
+Line numbers are not part of the logical identity, because code moves around through
+continuous iteration. Baseline merging and trimming match occurrences by logical
+identity first, so moving a secret to another line does not create a new finding,
+nor does it discard the audit decision attached to that occurrence.
 
 ### SecretsCollection
 

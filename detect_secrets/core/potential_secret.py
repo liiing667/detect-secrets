@@ -2,6 +2,7 @@ import hashlib
 from typing import Any
 from typing import Dict
 from typing import Optional
+from typing import Tuple
 from typing import Union
 
 from ..util.color import AnsiColor
@@ -43,15 +44,37 @@ class PotentialSecret:
         """
         self.type = type
         self.filename = filename
-        self.line_number = line_number
+        self.line_number = line_number or 0
         self.set_secret(secret)
         self.is_secret = is_secret
         self.is_verified = is_verified
 
-        # If two PotentialSecrets have the same values for these fields,
-        # they are considered equal. Note that line numbers aren't included
-        # in this, because line numbers are subject to change.
+        # These fields identify the same logical secret, even if its line number has
+        # drifted. They are used to match findings against older baselines (which may
+        # not contain line numbers at all).
         self.fields_to_compare = ['filename', 'secret_hash', 'type']
+
+    @property
+    def identity_key(self) -> Tuple[str, str, str]:
+        """Identifies a logical secret, independent of its line number."""
+        return (
+            self.filename,
+            self.secret_hash,
+            self.type,
+        )
+
+    @property
+    def baseline_identity(self) -> Tuple[str, str, str]:
+        """Alias for :attr:`identity_key`, used when matching baseline entries."""
+        return self.identity_key
+
+    @property
+    def location_key(self) -> Tuple:
+        """Identifies an occurrence, falling back to identity when the line is unknown."""
+        if self.line_number:
+            return (*self.identity_key, self.line_number)
+
+        return self.identity_key
 
     def set_secret(self, secret: str) -> None:
         self.secret_hash: str = self.hash_secret(secret)
@@ -116,21 +139,28 @@ class PotentialSecret:
         if not isinstance(other, PotentialSecret):
             return NotImplemented
 
-        return all(
+        if not all(
             getattr(self, field) == getattr(other, field)
             for field in self.fields_to_compare
-        )
+        ):
+            return False
+
+        # When both occurrences have known line numbers, different lines are different
+        # findings (e.g. the same token pasted into two environment blocks). If either
+        # location is unknown, retain the historical line-agnostic comparison so that
+        # slim baselines and line-number drift still match.
+        if self.line_number and other.line_number:
+            return self.line_number == other.line_number
+
+        return True
 
     def __ne__(self, other: Any) -> bool:
         return not self.__eq__(other)
 
     def __hash__(self) -> int:
-        return hash(
-            tuple(
-                getattr(self, x)
-                for x in self.fields_to_compare
-            ),
-        )
+        # The line number is deliberately excluded so that distinct occurrences share a
+        # hash bucket, while equality keeps them separate within the same set.
+        return hash(self.identity_key)
 
     def __str__(self) -> str:
         return (

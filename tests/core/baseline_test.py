@@ -108,6 +108,45 @@ def test_load_and_output():
             break
 
 
+def test_load_preserves_same_file_same_value_occurrences():
+    filename = 'duplicate.py'
+    data = {
+        'version': '1.5.0',
+        'plugins_used': [],
+        'filters_used': [],
+        'results': {
+            filename: [
+                {
+                    'type': 'AWS Access Key',
+                    'filename': filename,
+                    'hashed_secret': 'does not matter',
+                    'is_verified': False,
+                    'line_number': line_number,
+                }
+                for line_number in (1, 3)
+            ],
+        },
+    }
+
+    secrets = baseline.load(data)
+
+    assert len(secrets[filename]) == 2
+    assert {
+        secret.line_number
+        for secret in secrets[filename]
+    } == {1, 3}
+
+
+def test_load_legacy_baseline_with_collapsed_occurrence():
+    filename = 'test_data/files/duplicate_secrets.py'
+    secrets = baseline.load(
+        baseline.load_from_file('test_data/legacy_duplicate_secrets.baseline'),
+    )
+
+    assert len(secrets[filename]) == 1
+    assert next(iter(secrets[filename])).line_number == 2
+
+
 def test_plugin_not_found_in_baseline():
     # Test fix for the issue in #718
     data = {

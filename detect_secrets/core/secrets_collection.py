@@ -4,6 +4,7 @@ from collections import defaultdict
 from typing import Any
 from typing import Dict
 from typing import Generator
+from typing import Iterable
 from typing import List
 from typing import Optional
 from typing import Set
@@ -103,23 +104,17 @@ class SecretsCollection:
             if filename not in self.files:
                 continue
 
-            # This allows us to obtain the same secret, by accessing the hash.
-            mapping = {
-                secret: secret
-                for secret in self.data[filename]
-            }
-
-            for old_secret in old_results.data[filename]:
-                if old_secret not in mapping:
-                    continue
-
+            for old_secret, new_secret in _pair_secrets(
+                old_results.data[filename],
+                self.data[filename],
+            ):
                 # Only override if there's no newer value.
-                if mapping[old_secret].is_secret is None:
-                    mapping[old_secret].is_secret = old_secret.is_secret
+                if new_secret.is_secret is None:
+                    new_secret.is_secret = old_secret.is_secret
 
                 # If the old value is false, it won't make a difference.
-                if not mapping[old_secret].is_verified:
-                    mapping[old_secret].is_verified = old_secret.is_verified
+                if not new_secret.is_verified:
+                    new_secret.is_verified = old_secret.is_verified
 
     def trim(
         self,
@@ -160,23 +155,20 @@ class SecretsCollection:
         else:
             fileset = set(filelist)
 
-        # Unfortunately, we can't merely do a set intersection since we want to update the line
-        # numbers (if applicable). Therefore, this does it manually.
+        # We can't merely do a set intersection: duplicate occurrences of the same secret
+        # are distinct findings now, and we want to update line numbers (if applicable).
         result: Dict[str, Set[PotentialSecret]] = defaultdict(set)
 
         for filename in scanned_results.files:
             if filename not in self.files:
                 continue
 
-            # We construct this so we can get O(1) retrieval of secrets.
-            existing_secret_map = {secret: secret for secret in self[filename]}
-            for secret in scanned_results[filename]:
-                if secret not in existing_secret_map:
-                    continue
-
+            for existing_secret, secret in _pair_secrets(
+                self[filename],
+                scanned_results[filename],
+            ):
                 # Currently, we assume that the `scanned_results` have no labelled data, so
                 # we only want to obtain the latest line number from it.
-                existing_secret = existing_secret_map[secret]
                 if existing_secret.line_number:
                     # Only update line numbers if we're tracking them.
                     existing_secret.line_number = secret.line_number
@@ -250,36 +242,42 @@ class SecretsCollection:
             return False
 
         for filename in self.files:
-            self_mapping = {
-                (secret.secret_hash, secret.type): secret for secret in self[filename]
-            }
-            other_mapping = {
-                (secret.secret_hash, secret.type): secret for secret in other[filename]
-            }
+            self_groups = _group_by_identity(self[filename])
+            other_groups = _group_by_identity(other[filename])
 
-            # Since PotentialSecret is hashable, we compare their identities through this.
-            if set(self_mapping.values()) != set(other_mapping.values()):
+            if set(self_groups) != set(other_groups):
                 return False
 
-            if not strict:
-                continue
+            for identity, self_secrets in self_groups.items():
+                other_secrets = other_groups[identity]
+                if len(self_secrets) != len(other_secrets):
+                    return False
 
-            for secretA in self_mapping.values():
-                secretB = other_mapping[(secretA.secret_hash, secretA.type)]
+                if not strict:
+                    continue
 
-                valuesA = vars(secretA)
-                valuesA.pop('secret_value')
-                valuesB = vars(secretB)
-                valuesB.pop('secret_value')
+                # Occurrences of the same logical secret line up in line order.
+                for secretA, secretB in zip(
+                    sorted(self_secrets, key=lambda secret: secret.line_number),
+                    sorted(other_secrets, key=lambda secret: secret.line_number),
+                ):
+                    valuesA = dict(vars(secretA))
+                    valuesA.pop('secret_value', None)
+                    valuesB = dict(vars(secretB))
+                    valuesB.pop('secret_value', None)
 
-                if valuesA['line_number'] == 0 or valuesB['line_number'] == 0:
-                    # If line numbers are not provided (for either one), then don't compare
-                    # line numbers.
                     valuesA.pop('line_number')
                     valuesB.pop('line_number')
 
-                if valuesA != valuesB:
-                    return False
+                    if (
+                        secretA.line_number
+                        and secretB.line_number
+                        and secretA.line_number != secretB.line_number
+                    ):
+                        return False
+
+                    if valuesA != valuesB:
+                        return False
 
         return True
 
@@ -287,7 +285,10 @@ class SecretsCollection:
         return not self.__eq__(other)
 
     def __sub__(self, other: Any) -> 'SecretsCollection':
-        """This behaves like set subtraction."""
+        """This behaves like set subtraction, matching occurrences across line drift.
+
+        An additional occurrence of an already-known secret is still considered new.
+        """
         if not isinstance(other, SecretsCollection):
             raise NotImplementedError
 
@@ -298,7 +299,18 @@ class SecretsCollection:
             if filename not in self.files:
                 continue
 
-            output[filename] = self[filename] - other[filename]
+            matched_occurrence_ids = {
+                id(current_secret)
+                for _, current_secret in _pair_secrets(
+                    other[filename],
+                    self[filename],
+                )
+            }
+            output[filename] = {
+                secret
+                for secret in self[filename]
+                if id(secret) not in matched_occurrence_ids
+            }
 
         for filename in self.files:
             if filename in other.files:
@@ -316,3 +328,85 @@ class SecretsCollection:
 def _scan_file_and_serialize(filename: str) -> List[PotentialSecret]:
     """Used for multiprocessing, since lambdas can't be serialized."""
     return list(scan.scan_file(filename))
+
+
+def _group_by_identity(
+    secrets: Iterable[PotentialSecret],
+) -> Dict[Tuple[str, str, str], List[PotentialSecret]]:
+    groups: Dict[Tuple[str, str, str], List[PotentialSecret]] = defaultdict(list)
+    for secret in secrets:
+        groups[secret.identity_key].append(secret)
+
+    return groups
+
+
+def _pair_secrets(
+    reference: Iterable[PotentialSecret],
+    current: Iterable[PotentialSecret],
+) -> List[Tuple[PotentialSecret, PotentialSecret]]:
+    """Pairs occurrences from two scans of the same file.
+
+    Occurrences are grouped by their line-agnostic identity, so labels never leak
+    between different secrets or plugin types. Within a group:
+
+    1. Exact line matches are paired first, which prevents labels from moving onto
+       another occurrence after an adjacent duplicate is deleted.
+    2. Remaining occurrences are paired in line order when the counts match, which
+       handles groups shifting because lines were inserted above them.
+    3. Otherwise, remaining occurrences are paired by closest line number, which
+       handles a deletion while preserving the most likely survivor's label.
+    """
+    reference_groups = _group_by_identity(reference)
+    current_groups = _group_by_identity(current)
+
+    pairs: List[Tuple[PotentialSecret, PotentialSecret]] = []
+    for identity, reference_secrets in reference_groups.items():
+        if identity not in current_groups:
+            continue
+
+        remaining_reference = list(reference_secrets)
+        remaining_current = list(current_groups[identity])
+
+        # Exact location matches take priority.
+        for reference_secret in list(remaining_reference):
+            if not reference_secret.line_number:
+                continue
+
+            for current_secret in remaining_current:
+                if current_secret.line_number == reference_secret.line_number:
+                    pairs.append((reference_secret, current_secret))
+                    remaining_reference.remove(reference_secret)
+                    remaining_current.remove(current_secret)
+                    break
+
+        if not remaining_reference or not remaining_current:
+            continue
+
+        if len(remaining_reference) == len(remaining_current):
+            remaining_reference.sort(key=lambda secret: secret.line_number)
+            remaining_current.sort(key=lambda secret: secret.line_number)
+            pairs.extend(zip(remaining_reference, remaining_current))
+            continue
+
+        # Pair the closest remaining occurrences one at a time. Unknown line numbers
+        # sort first (line 0), so slim baseline entries match the earliest occurrence.
+        while remaining_reference and remaining_current:
+            best_pair = min(
+                (
+                    (
+                        abs(reference_secret.line_number - current_secret.line_number),
+                        reference_secret.line_number,
+                        current_secret.line_number,
+                        reference_secret,
+                        current_secret,
+                    )
+                    for reference_secret in remaining_reference
+                    for current_secret in remaining_current
+                ),
+                key=lambda item: item[:3],
+            )
+            pairs.append((best_pair[3], best_pair[4]))
+            remaining_reference.remove(best_pair[3])
+            remaining_current.remove(best_pair[4])
+
+    return pairs

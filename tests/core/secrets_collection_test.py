@@ -1,8 +1,10 @@
 from pathlib import Path
+import textwrap
 from unittest import mock
 
 import pytest
 
+from detect_secrets.core import baseline
 from detect_secrets.core.secrets_collection import SecretsCollection
 from detect_secrets.settings import get_settings
 from detect_secrets.settings import transient_settings
@@ -130,6 +132,224 @@ class TestScanFile:
         secrets.scan_file(filename)
 
         assert bool(secrets)
+
+
+class TestDuplicateOccurrences:
+    FILENAME = 'test_data/files/duplicate_secrets.py'
+
+    @staticmethod
+    def test_scan_keeps_every_line_based_occurrence():
+        with transient_settings({
+            'plugins_used': [{'name': 'AWSKeyDetector'}],
+            'filters_used': [],
+        }):
+            secrets = SecretsCollection()
+            secrets.scan_file(TestDuplicateOccurrences.FILENAME)
+
+        findings = sorted(secrets[TestDuplicateOccurrences.FILENAME], key=lambda x: x.line_number)
+        assert len(findings) == 2
+        assert [secret.line_number for secret in findings] == [2, 4]
+        assert len({secret.secret_hash for secret in findings}) == 1
+
+    @staticmethod
+    def test_parallel_scan_keeps_every_occurrence():
+        with transient_settings({
+            'plugins_used': [{'name': 'AWSKeyDetector'}],
+            'filters_used': [],
+        }):
+            secrets = SecretsCollection()
+            secrets.scan_files(
+                TestDuplicateOccurrences.FILENAME,
+                'test_data/files/file_with_no_secrets.py',
+                num_processors=2,
+            )
+
+        assert sorted(
+            secret.line_number
+            for secret in secrets[TestDuplicateOccurrences.FILENAME]
+        ) == [2, 4]
+
+    @staticmethod
+    def test_allowlist_decision_does_not_leak_between_lines():
+        with transient_settings({
+            'plugins_used': [{'name': 'AWSKeyDetector'}],
+        }):
+            secrets = SecretsCollection()
+            secrets.scan_file('test_data/files/partially_allowlisted_secrets.py')
+
+        findings = secrets['test_data/files/partially_allowlisted_secrets.py']
+        assert len(findings) == 1
+        assert next(iter(findings)).line_number == 3
+
+    @staticmethod
+    def test_merge_inherits_labels_per_occurrence():
+        old_secrets = SecretsCollection()
+        old_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=2, is_secret=True),
+            potential_secret_factory(filename='blah', line_number=4, is_secret=False),
+        })
+
+        new_secrets = SecretsCollection()
+        new_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=2),
+            potential_secret_factory(filename='blah', line_number=4),
+        })
+
+        new_secrets.merge(old_secrets)
+
+        labels = {
+            secret.line_number: secret.is_secret
+            for secret in new_secrets['blah']
+        }
+        assert labels == {2: True, 4: False}
+
+    @staticmethod
+    def test_merge_follows_occurrences_across_line_drift():
+        old_secrets = SecretsCollection()
+        old_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=2, is_secret=False),
+            potential_secret_factory(filename='blah', line_number=4, is_secret=True),
+        })
+
+        new_secrets = SecretsCollection()
+        new_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=3),
+            potential_secret_factory(filename='blah', line_number=5),
+        })
+
+        new_secrets.merge(old_secrets)
+
+        labels = {
+            secret.line_number: secret.is_secret
+            for secret in new_secrets['blah']
+        }
+        assert labels == {3: False, 5: True}
+
+    @staticmethod
+    def test_merge_does_not_label_a_new_occurrence():
+        old_secrets = SecretsCollection()
+        old_secrets['blah'].add(
+            potential_secret_factory(filename='blah', line_number=2, is_secret=True),
+        )
+
+        new_secrets = SecretsCollection()
+        new_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=2),
+            potential_secret_factory(filename='blah', line_number=4),
+        })
+
+        new_secrets.merge(old_secrets)
+
+        labels = {
+            secret.line_number: secret.is_secret
+            for secret in new_secrets['blah']
+        }
+        assert labels == {2: True, 4: None}
+
+    @staticmethod
+    def test_trim_keeps_the_surviving_occurrence_label():
+        labelled_secrets = SecretsCollection()
+        labelled_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=2, is_secret=True),
+            potential_secret_factory(filename='blah', line_number=4, is_secret=False),
+        })
+
+        scanned_results = SecretsCollection()
+        scanned_results['blah'].add(
+            potential_secret_factory(filename='blah', line_number=4),
+        )
+
+        labelled_secrets.trim(scanned_results)
+
+        remaining = next(iter(labelled_secrets['blah']))
+        assert remaining.line_number == 4
+        assert remaining.is_secret is False
+
+    @staticmethod
+    def test_trim_keeps_occurrences_separate_across_line_drift():
+        labelled_secrets = SecretsCollection()
+        labelled_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=2, is_secret=True),
+            potential_secret_factory(filename='blah', line_number=4, is_secret=False),
+        })
+
+        scanned_results = SecretsCollection()
+        scanned_results['blah'].update({
+            potential_secret_factory(filename='blah', line_number=3),
+            potential_secret_factory(filename='blah', line_number=5),
+        })
+
+        labelled_secrets.trim(scanned_results)
+
+        labels = {
+            secret.line_number: secret.is_secret
+            for secret in labelled_secrets['blah']
+        }
+        assert labels == {3: True, 5: False}
+
+    @staticmethod
+    def test_subtraction_ignores_line_drift_but_flags_new_occurrence():
+        baseline_secrets = SecretsCollection()
+        baseline_secrets['blah'].add(
+            potential_secret_factory(filename='blah', line_number=2),
+        )
+
+        scanned_secrets = SecretsCollection()
+        scanned_secrets['blah'].update({
+            potential_secret_factory(filename='blah', line_number=3),
+            potential_secret_factory(filename='blah', line_number=5),
+        })
+
+        new_secrets = scanned_secrets - baseline_secrets
+        assert len(new_secrets['blah']) == 1
+        assert next(iter(new_secrets['blah'])).line_number == 5
+
+    @staticmethod
+    def test_legacy_baseline_is_readable_and_preserves_labels():
+        legacy_baseline = baseline.load(
+            baseline.load_from_file('test_data/legacy_duplicate_secrets.baseline'),
+        )
+
+        assert len(legacy_baseline[TestDuplicateOccurrences.FILENAME]) == 1
+
+        with transient_settings({
+            'plugins_used': [{'name': 'AWSKeyDetector'}],
+            'filters_used': [],
+        }):
+            scanned = SecretsCollection()
+            scanned.scan_file(TestDuplicateOccurrences.FILENAME)
+
+        scanned.merge(legacy_baseline)
+
+        labels = {
+            secret.line_number: secret.is_secret
+            for secret in scanned[TestDuplicateOccurrences.FILENAME]
+        }
+        assert labels == {2: False, 4: None}
+
+    @staticmethod
+    def test_scan_diff_keeps_both_added_occurrences():
+        diff = textwrap.dedent("""
+            diff --git a/test_data/files/duplicate_secrets.py \
+b/test_data/files/duplicate_secrets.py
+            --- a/test_data/files/duplicate_secrets.py
+            +++ b/test_data/files/duplicate_secrets.py
+            @@ -1,2 +1,4 @@
+             #!/usr/bin/python
+            +first = 'AKIAIOSFODNN7EXAMPLE'
+            +second = 'AKIAIOSFODNN7EXAMPLE'
+             INSERTED_LINE = 'nothing to see here'
+        """).lstrip()
+
+        with transient_settings({
+            'plugins_used': [{'name': 'AWSKeyDetector'}],
+            'filters_used': [],
+        }):
+            secrets = SecretsCollection()
+            secrets.scan_diff(diff)
+
+        findings = secrets['test_data/files/duplicate_secrets.py']
+        assert sorted(secret.line_number for secret in findings) == [2, 3]
 
 
 class TestScanDiff:
@@ -344,6 +564,20 @@ class TestEqual:
         secretsB[secret.filename].add(secret)
 
         assert secretsA == secretsB
+        assert not secretsA.exactly_equals(secretsB)
+
+    @staticmethod
+    def test_occurrence_counts_matter():
+        secretsA = SecretsCollection()
+        secretsA['blah'].add(potential_secret_factory(filename='blah', line_number=1))
+
+        secretsB = SecretsCollection()
+        secretsB['blah'].update({
+            potential_secret_factory(filename='blah', line_number=1),
+            potential_secret_factory(filename='blah', line_number=2),
+        })
+
+        assert secretsA != secretsB
         assert not secretsA.exactly_equals(secretsB)
 
 
