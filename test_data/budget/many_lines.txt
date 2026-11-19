@@ -1,0 +1,10 @@
+secret = 'c3VwZXIgbG9uZyBzdHJpbmcgc2hvdWxkIGNhdXNlIGVub3VnaCBlbnRyb3B5'
+# padding line 2
+# padding line 3
+# padding line 4
+# padding line 5
+# padding line 6
+# padding line 7
+# padding line 8
+# padding line 9
+secret = 'ZGV0ZWN0LXNlY3JldHMtaXMtYS1ncmVhdC10b29sLXRvLXByZXZlbnQ'

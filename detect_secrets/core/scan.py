@@ -21,6 +21,8 @@ from ..util.code_snippet import CodeSnippet
 from ..util.code_snippet import get_code_snippet
 from ..util.inject import call_function_with_arguments
 from ..util.path import get_relative_path
+from .budget import get_budget
+from .budget import get_tracker
 from .log import log
 from .plugins import Plugin
 from .potential_secret import PotentialSecret
@@ -82,6 +84,8 @@ def get_files_to_scan(
         yield from []
         return
 
+    budget = get_budget()
+    files_emitted = 0
     for path in paths:
         iterator = (
             cast(List[Tuple], [(root or os.getcwd(), None, [path])])
@@ -103,6 +107,18 @@ def get_files_to_scan(
                     valid_paths is True
                     or relative_path in valid_paths
                 ):
+                    if budget.max_files is not None and files_emitted >= budget.max_files:
+                        get_tracker().record(
+                            'file_count_exceeded',
+                            detail=(
+                                f'Only the first {budget.max_files} files were scanned; '
+                                f'"{relative_path}" and any remaining files were skipped.'
+                            ),
+                            once=True,
+                        )
+                        return
+
+                    files_emitted += 1
                     yield relative_path
 
 
@@ -149,6 +165,9 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
     if _is_filtered_out(required_filter_parameters=['filename'], filename=filename):
         return
 
+    if _exceeds_file_size_budget(filename):
+        return
+
     try:
         has_secret = False
         for lines in _get_lines_from_file(filename):
@@ -164,6 +183,30 @@ def scan_file(filename: str) -> Generator[PotentialSecret, None, None]:
     except IOError:
         log.warning(f'Unable to open file: {filename}')
         return
+
+
+def _exceeds_file_size_budget(filename: str) -> bool:
+    max_file_bytes = get_budget().max_file_bytes
+    if max_file_bytes is None:
+        return False
+
+    try:
+        file_size = os.path.getsize(filename)
+    except OSError:
+        return False
+
+    if file_size <= max_file_bytes:
+        return False
+
+    get_tracker().record(
+        'file_size_exceeded',
+        filename=filename,
+        detail=(
+            f'File is {file_size} bytes, exceeding the budget of {max_file_bytes} '
+            'bytes; file was skipped.'
+        ),
+    )
+    return True
 
 
 def scan_diff(diff: str) -> Generator[PotentialSecret, None, None]:
@@ -269,7 +312,7 @@ def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
             # We flat out ignore binary files
             return
 
-        yield lines
+        yield _enforce_line_budgets(lines, filename)
 
         # If the above lines don't prove to be useful to the caller, try using eager transformers.
         f.seek(0)
@@ -277,7 +320,53 @@ def _get_lines_from_file(filename: str) -> Generator[List[str], None, None]:
         if not lines:
             return
 
-        yield lines
+        yield _enforce_line_budgets(lines, filename)
+
+
+def _enforce_line_budgets(lines: List[str], filename: str) -> List[str]:
+    """
+    Truncates the lines of a file to the configured budgets, recording a budget
+    event whenever content is dropped. This bounds the amount of work (and
+    memory) that pathological files (e.g. minified files with huge lines) can
+    cause, while making the truncation visible rather than silently returning
+    incomplete results.
+    """
+    budget = get_budget()
+
+    if budget.max_lines_per_file is not None and len(lines) > budget.max_lines_per_file:
+        get_tracker().record(
+            'line_count_exceeded',
+            filename=filename,
+            detail=(
+                f'File has {len(lines)} lines, exceeding the budget of '
+                f'{budget.max_lines_per_file}; remaining lines were not scanned.'
+            ),
+        )
+        lines = lines[:budget.max_lines_per_file]
+
+    if budget.max_line_length is not None:
+        was_truncated = False
+        trimmed_lines = []
+        for line in lines:
+            if len(line) > budget.max_line_length:
+                was_truncated = True
+                line = line[:budget.max_line_length]
+
+            trimmed_lines.append(line)
+
+        if was_truncated:
+            get_tracker().record(
+                'line_length_exceeded',
+                filename=filename,
+                detail=(
+                    'One or more lines exceed the budget of '
+                    f'{budget.max_line_length} characters; trailing content was '
+                    'not scanned.'
+                ),
+            )
+            lines = trimmed_lines
+
+    return lines
 
 
 def _get_lines_from_diff(diff: str) -> Generator[Tuple[str, List[Tuple[int, str]]], None, None]:

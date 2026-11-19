@@ -625,6 +625,44 @@ $ detect-secrets scan --gibberish-model custom.model
 
 This is not a default plugin, given that this will ignore secrets such as `password`.
 
+## Scan Budgets
+
+When scanning large or untrusted repositories, pathological inputs (e.g. extremely long
+lines, an overwhelming number of files, or files whose encoding balloons in memory) can
+cause scans to consume unbounded resources. To guard against this, `detect-secrets scan`
+supports configurable resource budgets:
+
+```bash
+$ detect-secrets scan --max-files 10000 --max-file-bytes 1048576 \
+    --max-lines-per-file 100000 --max-line-length 10000 --max-secrets 1000
+```
+
+Each budget can also be configured through an environment variable
+(`DETECT_SECRETS_MAX_FILES`, `DETECT_SECRETS_MAX_FILE_BYTES`,
+`DETECT_SECRETS_MAX_LINES_PER_FILE`, `DETECT_SECRETS_MAX_LINE_LENGTH`,
+`DETECT_SECRETS_MAX_SECRETS`), which is useful for the pre-commit hook as well.
+
+When a budget is exceeded, the scan is truncated in a controlled manner (oversized files
+are skipped, long lines are truncated, and extra results are discarded), and the output
+is explicitly flagged as incomplete rather than looking like a clean scan:
+
+```json
+"scan_status": {
+    "is_complete": false,
+    "events": [
+        {
+            "reason": "file_size_exceeded",
+            "filename": "path/to/large_file.bin",
+            "detail": "File is 2097153 bytes, exceeding the budget of 1048576 bytes; file was skipped."
+        }
+    ],
+    "events_truncated": false
+}
+```
+
+The `scan_status` key is only present when a budget was exceeded; scans that stay within
+budget produce the same output as before.
+
 ## Caveats
 
 This is not meant to be a sure-fire solution to prevent secrets from entering the codebase. Only

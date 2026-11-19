@@ -2,6 +2,7 @@ import argparse
 from typing import cast
 
 from . import baseline
+from ...core.budget import configure_budget
 from ...settings import get_settings
 from .common import initialize_plugin_settings
 
@@ -85,11 +86,73 @@ def _add_initialize_baseline_options(parser: argparse.ArgumentParser) -> None:
             'slim baselines will need to be remade to be audited.'
         ),
     )
+    _add_scan_budget_options(group)
+
+
+def _add_scan_budget_options(group: argparse._ArgumentGroup) -> None:
+    group.add_argument(
+        '--max-files',
+        type=int,
+        metavar='<n>',
+        help=(
+            'Maximum number of files to scan. Additional files are skipped, and the '
+            'results are flagged as incomplete. Can also be set with the '
+            'DETECT_SECRETS_MAX_FILES environment variable.'
+        ),
+    )
+    group.add_argument(
+        '--max-file-bytes',
+        type=int,
+        metavar='<n>',
+        help=(
+            'Maximum size (in bytes) of an individual file. Larger files are skipped, '
+            'and the results are flagged as incomplete. Can also be set with the '
+            'DETECT_SECRETS_MAX_FILE_BYTES environment variable.'
+        ),
+    )
+    group.add_argument(
+        '--max-lines-per-file',
+        type=int,
+        metavar='<n>',
+        help=(
+            'Maximum number of lines scanned per file. Remaining lines are ignored, '
+            'and the results are flagged as incomplete. Can also be set with the '
+            'DETECT_SECRETS_MAX_LINES_PER_FILE environment variable.'
+        ),
+    )
+    group.add_argument(
+        '--max-line-length',
+        type=int,
+        metavar='<n>',
+        help=(
+            'Maximum line length (in characters). Longer lines are truncated, and the '
+            'results are flagged as incomplete. Can also be set with the '
+            'DETECT_SECRETS_MAX_LINE_LENGTH environment variable.'
+        ),
+    )
+    group.add_argument(
+        '--max-secrets',
+        type=int,
+        metavar='<n>',
+        help=(
+            'Maximum number of secrets collected in a single scan. Additional secrets '
+            'are discarded, and the results are flagged as incomplete. Can also be set '
+            'with the DETECT_SECRETS_MAX_SECRETS environment variable.'
+        ),
+    )
 
 
 def parse_args(args: argparse.Namespace) -> None:
     if args.action != 'scan':
         return
+
+    configure_budget(
+        max_files=args.max_files,
+        max_file_bytes=args.max_file_bytes,
+        max_lines_per_file=args.max_lines_per_file,
+        max_line_length=args.max_line_length,
+        max_secrets=args.max_secrets,
+    )
 
     # NOTE: This is assumed to run *after* the baseline argument processor, and before
     # the plugin argument processor.

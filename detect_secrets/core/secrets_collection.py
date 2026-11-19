@@ -11,6 +11,11 @@ from typing import Tuple
 
 from . import scan
 from ..util.path import convert_local_os_path
+from .budget import get_budget
+from .budget import get_tracker
+from .budget import reset_tracker
+from .budget import ScanBudget
+from .budget import set_budget
 from .potential_secret import PotentialSecret
 from detect_secrets.settings import configure_settings_from_baseline
 from detect_secrets.settings import get_settings
@@ -62,18 +67,31 @@ class SecretsCollection:
 
         with mp.Pool(
             processes=num_processors,
-            initializer=configure_settings_from_baseline,
-            initargs=(child_process_settings,),
+            initializer=_initialize_child_process,
+            initargs=(child_process_settings, get_budget()),
         ) as p:
-            for secrets in p.imap_unordered(
+            for secrets, events in p.imap_unordered(
                 _scan_file_and_serialize,
                 [os.path.join(self.root, filename) for filename in filenames],
             ):
+                get_tracker().merge(events)
+
+                budget_exhausted = self._secret_budget_exhausted()
                 for secret in secrets:
+                    if budget_exhausted:
+                        break
+
                     self[os.path.relpath(secret.filename, self.root)].add(secret)
+                    budget_exhausted = self._secret_budget_exhausted()
+
+                if budget_exhausted:
+                    break
 
     def scan_file(self, filename: str) -> None:
         for secret in scan.scan_file(os.path.join(self.root, convert_local_os_path(filename))):
+            if self._secret_budget_exhausted():
+                break
+
             self[convert_local_os_path(filename)].add(secret)
 
     def scan_diff(self, diff: str) -> None:
@@ -82,12 +100,35 @@ class SecretsCollection:
         """
         try:
             for secret in scan.scan_diff(diff):
+                if self._secret_budget_exhausted():
+                    break
+
                 self[secret.filename].add(secret)
         except ImportError:     # pragma: no cover
             raise NotImplementedError(
                 'SecretsCollection.scan_diff requires `unidiff` to work. Try pip '
                 'installing that package, and try again.',
             )
+
+    def _secret_budget_exhausted(self) -> bool:
+        """
+        Checks whether the result collection has reached the configured budget.
+        When it has, a (single) budget event is recorded, so that the truncated
+        results are visibly flagged as incomplete rather than looking clean.
+        """
+        max_secrets = get_budget().max_secrets
+        if max_secrets is None or len(self) < max_secrets:
+            return False
+
+        get_tracker().record(
+            'secret_count_exceeded',
+            detail=(
+                f'Result collection reached the budget of {max_secrets} secrets; '
+                'any additional secrets were discarded.'
+            ),
+            once=True,
+        )
+        return True
 
     def merge(self, old_results: 'SecretsCollection') -> None:
         """
@@ -313,6 +354,16 @@ class SecretsCollection:
         return sum(len(secrets) for secrets in self.data.values())
 
 
-def _scan_file_and_serialize(filename: str) -> List[PotentialSecret]:
+def _initialize_child_process(settings: Dict[str, Any], budget: ScanBudget) -> None:
+    configure_settings_from_baseline(settings)
+
+    # Child processes need the same budgets as the parent, but a fresh tracker
+    # (so that events can be merged back into the parent's tracker).
+    set_budget(budget)
+    reset_tracker()
+
+
+def _scan_file_and_serialize(filename: str) -> Tuple[List[PotentialSecret], Dict[str, Any]]:
     """Used for multiprocessing, since lambdas can't be serialized."""
-    return list(scan.scan_file(filename))
+    secrets = list(scan.scan_file(filename))
+    return secrets, get_tracker().json()

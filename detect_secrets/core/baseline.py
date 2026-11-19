@@ -15,6 +15,7 @@ from ..settings import configure_settings_from_baseline
 from ..settings import get_settings
 from ..util.importlib import import_modules_from_package
 from ..util.semver import Version
+from .budget import get_tracker
 from .scan import get_files_to_scan
 from .secrets_collection import SecretsCollection
 
@@ -85,6 +86,13 @@ def format_for_output(secrets: SecretsCollection, is_slim_mode: bool = False) ->
         ).items():
             for secret_dict in secret_list:
                 secret_dict.pop('line_number')
+
+    # If any scan budgets were exceeded, the results are incomplete: surface this
+    # explicitly, rather than letting them look like a clean scan. When the scan
+    # is complete, the output is left untouched for backwards compatibility.
+    scan_status = get_tracker().json()
+    if not scan_status['is_complete']:
+        output['scan_status'] = scan_status
 
     return output
 

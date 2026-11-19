@@ -8,6 +8,7 @@ import responses
 import detect_secrets
 from detect_secrets import filters
 from detect_secrets import settings
+from detect_secrets.core import budget
 from detect_secrets.core.plugins.util import get_mapping_from_secret_type_to_class
 from detect_secrets.util.importlib import get_modules_from_package
 from testing.mocks import MockLogWrapper
@@ -22,6 +23,9 @@ def clear_cache():
 
     settings.get_settings().clear()
     settings.cache_bust()
+
+    # Scan budgets are global state as well; reset them so tests are isolated.
+    budget.reset_budget_state()
 
     # This is probably too aggressive, but it saves us from remembering to do this every
     # time we add a filter.
