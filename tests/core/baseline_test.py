@@ -8,6 +8,7 @@ from unittest import mock
 import pytest
 
 from detect_secrets.core import baseline
+from detect_secrets.exceptions import InvalidBaselineError
 from detect_secrets.settings import get_settings
 from detect_secrets.util.path import get_relative_path_if_in_cwd
 from testing.mocks import mock_named_temporary_file
@@ -106,6 +107,32 @@ def test_load_and_output():
         if plugin['name'] == 'Base64HighEntropyString':
             assert plugin['limit'] == 4.5
             break
+
+
+def test_load_rejects_baseline_with_conflicting_labels():
+    # Fixed fixture: two records with the same file, fingerprint and type, but opposite
+    # `is_secret` values. The conflict must be rejected rather than decided by load order.
+    with open('test_data/conflicting_baselines/conflicting.baseline') as f:
+        data = json.loads(f.read())
+
+    with pytest.raises(InvalidBaselineError) as exc_info:
+        baseline.load(data)
+
+    assert 'Conflicting `is_secret`' in str(exc_info.value)
+
+
+def test_load_merges_duplicate_records_from_fixture():
+    # Fixed fixture: duplicate records of the same secret at different lines. The
+    # false-positive label and the verification status are both preserved.
+    with open('test_data/conflicting_baselines/duplicate_records.baseline') as f:
+        data = json.loads(f.read())
+
+    secrets = baseline.load(data)
+
+    assert len(secrets['example.py']) == 1
+    secret = next(iter(secrets['example.py']))
+    assert secret.is_secret is False
+    assert secret.is_verified is True
 
 
 def test_plugin_not_found_in_baseline():

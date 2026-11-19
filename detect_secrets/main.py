@@ -26,10 +26,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     if args.verbose:    # pragma: no cover
         log.set_debug_level(args.verbose)
 
-    if args.action == 'scan':
-        handle_scan_action(args)
-    elif args.action == 'audit':
-        handle_audit_action(args)
+    try:
+        if args.action == 'scan':
+            handle_scan_action(args)
+        elif args.action == 'audit':
+            handle_audit_action(args)
+    except InvalidBaselineError as e:
+        print(str(e), file=sys.stderr)
+        return 1
 
     return 0
 

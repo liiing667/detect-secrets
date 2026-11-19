@@ -13,6 +13,7 @@ import pytest
 from detect_secrets import main as main_module
 from detect_secrets.core import baseline
 from detect_secrets.core.secrets_collection import SecretsCollection
+from detect_secrets.exceptions import InvalidBaselineError
 from detect_secrets.main import scan_adhoc_string
 from detect_secrets.settings import transient_settings
 from testing.mocks import disable_gibberish_filter
@@ -61,6 +62,18 @@ class TestScan:
                 },
             ]
             assert not printer.message
+
+    @staticmethod
+    def test_fails_closed_on_conflicting_baseline():
+        with pytest.raises(SystemExit) as exc_info:
+            main_module.main([
+                'scan',
+                'test_data',
+                '--baseline',
+                'test_data/conflicting_baselines/conflicting.baseline',
+            ])
+
+        assert exc_info.value.code == 1
 
     @staticmethod
     @pytest.mark.xfail(
@@ -227,6 +240,17 @@ def test_list_all_plugins():
         assert main_module.main(['scan', '--list-all-plugins']) == 0
 
     assert printer.message
+
+
+def test_main_returns_1_when_baseline_is_invalid():
+    # Fail closed: a classification conflict surfacing during the scan itself
+    # turns into a non-zero exit code instead of a silently corrupted baseline.
+    with mock.patch.object(
+        main_module,
+        'handle_scan_action',
+        side_effect=InvalidBaselineError('Conflicting `is_secret` values.'),
+    ):
+        assert main_module.main(['scan']) == 1
 
 
 @contextmanager

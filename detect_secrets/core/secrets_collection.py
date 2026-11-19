@@ -39,9 +39,19 @@ class SecretsCollection:
     def load_from_baseline(cls, baseline: Dict[str, Any]) -> 'SecretsCollection':
         output = cls()
         for filename in baseline['results']:
+            filename_key = convert_local_os_path(filename)
+            seen: Dict[PotentialSecret, PotentialSecret] = {}
             for item in baseline['results'][filename]:
                 secret = PotentialSecret.load_secret_from_dict({'filename': filename, **item})
-                output[convert_local_os_path(filename)].add(secret)
+                if secret in seen:
+                    # Duplicate records share a stable identity (filename, hash and type),
+                    # so their classification state has to agree. A conflict fails closed,
+                    # rather than being silently decided by load order.
+                    seen[secret].merge_classification(secret)
+                    continue
+
+                seen[secret] = secret
+                output[filename_key].add(secret)
 
         return output
 
@@ -113,13 +123,12 @@ class SecretsCollection:
                 if old_secret not in mapping:
                     continue
 
-                # Only override if there's no newer value.
-                if mapping[old_secret].is_secret is None:
-                    mapping[old_secret].is_secret = old_secret.is_secret
-
-                # If the old value is false, it won't make a difference.
-                if not mapping[old_secret].is_verified:
-                    mapping[old_secret].is_verified = old_secret.is_verified
+                # Classification state belongs to the record's stable identity, so merging
+                # follows the same rules as loading duplicate records: compatible labels
+                # are combined, while conflicts fail closed. Line numbers are intentionally
+                # excluded from the identity, so secrets moving across lines keep their
+                # labels.
+                mapping[old_secret].merge_classification(old_secret)
 
     def trim(
         self,

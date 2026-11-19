@@ -4,6 +4,7 @@ from unittest import mock
 import pytest
 
 from detect_secrets.core.secrets_collection import SecretsCollection
+from detect_secrets.exceptions import InvalidBaselineError
 from detect_secrets.settings import get_settings
 from detect_secrets.settings import transient_settings
 from testing.factories import potential_secret_factory
@@ -210,6 +211,124 @@ def test_merge():
             assert secret.is_verified is False
 
         index += 1
+
+
+class TestClassificationIdentity:
+    """Classification state belongs to a record's stable identity
+    (filename, hashed secret and type), not to the load order of occurrences.
+    """
+
+    @staticmethod
+    def test_load_rejects_conflicting_is_secret():
+        secret = potential_secret_factory()
+        conflicting = potential_secret_factory(line_number=2, is_secret=True)
+        secret.is_secret = False
+
+        with pytest.raises(InvalidBaselineError) as exc_info:
+            SecretsCollection.load_from_baseline(
+                {'results': {secret.filename: [secret.json(), conflicting.json()]}},
+            )
+
+        assert 'Conflicting `is_secret`' in str(exc_info.value)
+
+    @staticmethod
+    def test_load_keeps_verification_when_duplicate_disagrees():
+        # Verification is monotonic: an unverified duplicate can't downgrade a record
+        # that has already been verified.
+        verified = potential_secret_factory(is_verified=True)
+        unverified = potential_secret_factory(line_number=2, is_verified=False)
+
+        secrets = SecretsCollection.load_from_baseline(
+            {'results': {
+                verified.filename: [verified.json(), unverified.json()],
+            }},
+        )
+
+        merged = next(iter(secrets[verified.filename]))
+        assert merged.is_verified is True
+
+    @staticmethod
+    def test_load_merges_duplicate_records_with_compatible_labels():
+        # The first record carries a legitimate false-positive label at an older line,
+        # while the second record shows the same secret moved to another line and has
+        # been verified. Both labels survive the merge.
+        false_positive = potential_secret_factory(line_number=1, is_secret=False)
+        verified = potential_secret_factory(line_number=3, is_verified=True)
+
+        secrets = SecretsCollection.load_from_baseline(
+            {'results': {
+                false_positive.filename: [false_positive.json(), verified.json()],
+            }},
+        )
+
+        assert len(secrets[false_positive.filename]) == 1
+        merged = next(iter(secrets[false_positive.filename]))
+        assert merged.is_secret is False
+        assert merged.is_verified is True
+
+    @staticmethod
+    def test_load_merges_unlabelled_duplicate_records():
+        first = potential_secret_factory(line_number=1)
+        second = potential_secret_factory(line_number=2)
+
+        secrets = SecretsCollection.load_from_baseline(
+            {'results': {first.filename: [first.json(), second.json()]}},
+        )
+
+        assert len(secrets[first.filename]) == 1
+        merged = next(iter(secrets[first.filename]))
+        assert merged.is_secret is None
+        assert merged.is_verified is False
+
+    @staticmethod
+    def test_merge_rejects_conflicting_is_secret():
+        old_secrets = SecretsCollection()
+        old_secret = potential_secret_factory(is_secret=False)
+        old_secrets[old_secret.filename].add(old_secret)
+
+        new_secrets = SecretsCollection()
+        new_secret = potential_secret_factory(is_secret=True)
+        new_secrets[new_secret.filename].add(new_secret)
+
+        with pytest.raises(InvalidBaselineError):
+            new_secrets.merge(old_secrets)
+
+    @staticmethod
+    def test_merge_preserves_labels_across_line_movement():
+        # Same identity (filename, hash and type) but the secret moved lines.
+        old_secrets = SecretsCollection()
+        old_secret = potential_secret_factory(
+            line_number=1,
+            is_secret=False,
+            is_verified=True,
+        )
+        old_secrets[old_secret.filename].add(old_secret)
+
+        new_secrets = SecretsCollection()
+        new_secret = potential_secret_factory(line_number=4)
+        new_secrets[new_secret.filename].add(new_secret)
+
+        new_secrets.merge(old_secrets)
+
+        merged = next(iter(new_secrets[new_secret.filename]))
+        assert merged.line_number == 4
+        assert merged.is_secret is False
+        assert merged.is_verified is True
+
+    @staticmethod
+    def test_merge_does_not_downgrade_verification():
+        old_secrets = SecretsCollection()
+        old_secret = potential_secret_factory(is_verified=False)
+        old_secrets[old_secret.filename].add(old_secret)
+
+        new_secrets = SecretsCollection()
+        new_secret = potential_secret_factory(is_verified=True)
+        new_secrets[new_secret.filename].add(new_secret)
+
+        new_secrets.merge(old_secrets)
+
+        merged = next(iter(new_secrets[new_secret.filename]))
+        assert merged.is_verified is True
 
 
 class TestTrim:

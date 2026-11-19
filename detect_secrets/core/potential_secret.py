@@ -4,6 +4,7 @@ from typing import Dict
 from typing import Optional
 from typing import Union
 
+from ..exceptions import InvalidBaselineError
 from ..util.color import AnsiColor
 from ..util.color import colorize
 from ..util.path import convert_local_os_path
@@ -131,6 +132,36 @@ class PotentialSecret:
                 for x in self.fields_to_compare
             ),
         )
+
+    def merge_classification(self, other: 'PotentialSecret') -> None:
+        """
+        Merges the classification state (``is_secret`` and ``is_verified``) of another
+        record sharing the same stable identity (filename, secret hash and type) into this
+        one.
+
+        The classification state belongs to the record's identity rather than to any
+        particular occurrence, so duplicate records must agree on it. Conflicting labels
+        are rejected (fail closed) instead of being resolved by load order.
+
+        :raises: InvalidBaselineError
+        """
+        if (
+            self.is_secret is not None
+            and other.is_secret is not None
+            and self.is_secret != other.is_secret
+        ):
+            raise InvalidBaselineError(
+                f'Conflicting `is_secret` values for {self.type} secret '
+                f'{self.secret_hash} in {self.filename}: '
+                f'{self.is_secret} vs {other.is_secret}.',
+            )
+
+        if self.is_secret is None:
+            self.is_secret = other.is_secret
+
+        # Verification is a monotonic fact: once a secret has been verified, the label
+        # is never downgraded. A False->True upgrade is always allowed.
+        self.is_verified = self.is_verified or other.is_verified
 
     def __str__(self) -> str:
         return (
