@@ -120,6 +120,9 @@ def cache_bust() -> None:
             except AttributeError:
                 pass
 
+    from .core.verification_cache import clear_verification_cache
+    clear_verification_cache()
+
     get_settings.cache_clear()
 
 

@@ -20,9 +20,9 @@ import requests
 
 from ..constants import VerifiedResult
 from ..core.potential_secret import PotentialSecret
+from ..core.verification_cache import verify_secret
 from ..settings import get_settings
 from detect_secrets.util.code_snippet import CodeSnippet
-from detect_secrets.util.inject import call_function_with_arguments
 
 
 class BasePlugin(metaclass=ABCMeta):
@@ -62,8 +62,8 @@ class BasePlugin(metaclass=ABCMeta):
                 in get_settings().filters
             ):
                 try:
-                    verified_result = call_function_with_arguments(
-                        self.verify,
+                    verified_result = verify_secret(
+                        self,
                         secret=match,
                         context=context,
                     )

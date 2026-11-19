@@ -1,14 +1,15 @@
 import os
 from functools import lru_cache
+from typing import Optional
 from typing import cast
 
 import requests
 
 from ..constants import VerifiedResult
 from ..core.plugins import Plugin
+from ..core.verification_cache import verify_secret
 from ..settings import get_settings
 from ..util.code_snippet import CodeSnippet
-from ..util.inject import call_function_with_arguments
 from .util import get_caller_path
 
 
@@ -40,9 +41,13 @@ def is_ignored_due_to_verification_policies(
     There's no such thing as "only verified false", because if you're going to verify
     something, and it's verified false, why are you still including it as a valid secret?
     """
+    # Custom plugins may return arbitrary (e.g. falsy) values from `verify`, so we
+    # defensively handle that case below, even though `verify_secret` is typed to
+    # only return VerifiedResult values.
+    verify_result: Optional[VerifiedResult]
     try:
-        verify_result = call_function_with_arguments(
-            plugin.verify,
+        verify_result = verify_secret(
+            plugin,
             secret=secret,
             context=context,
         )
