@@ -58,7 +58,7 @@ class TestAddCustomLimits:
                             'base64_limit': 3,
                         },
                     ],
-                    'results': [],
+                    'results': {},
                 }).encode(),
             )
             f.seek(0)
@@ -79,7 +79,7 @@ class TestAddCustomLimits:
                             'base64_limit': 3,
                         },
                     ],
-                    'results': [],
+                    'results': {},
                 }).encode(),
             )
             f.seek(0)
@@ -128,7 +128,7 @@ class TestAddDisableFlag:
                             'name': 'AWSKeyDetector',
                         },
                     ],
-                    'results': [],
+                    'results': {},
                 }).encode(),
             )
             f.seek(0)

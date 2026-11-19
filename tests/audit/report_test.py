@@ -1,4 +1,5 @@
 import random
+import os
 import string
 import textwrap
 from contextlib import contextmanager
@@ -197,7 +198,9 @@ def count_results(data):
 
 @contextmanager
 def create_file_with_content(content):
-    with mock_named_temporary_file() as f:
+    # Baselines may only reference paths inside the working directory, so keep these
+    # scanned files in-tree rather than in the system temp directory.
+    with mock_named_temporary_file(dir='.') as f:
         f.write(content.encode())
         f.seek(0)
         yield f.name
@@ -245,17 +248,17 @@ def baseline_file():
                 ],
             }):
         secrets = SecretsCollection()
-        secrets.scan_file(first_file)
-        secrets.scan_file(second_file)
-        secrets.scan_file(third_file)
+        secrets.scan_file(os.path.relpath(first_file))
+        secrets.scan_file(os.path.relpath(second_file))
+        secrets.scan_file(os.path.relpath(third_file))
         labels = {
-            (first_file, BasicAuthDetector.secret_type, 1): True,
-            (first_file, BasicAuthDetector.secret_type, 2): None,
-            (first_file, BasicAuthDetector.secret_type, 3): True,
-            (second_file, JwtTokenDetector.secret_type, 1): True,
-            (second_file, BasicAuthDetector.secret_type, 1): False,
-            (second_file, BasicAuthDetector.secret_type, 2): False,
-            (third_file, AWSKeyDetector.secret_type, 1): True,
+            (os.path.relpath(first_file), BasicAuthDetector.secret_type, 1): True,
+            (os.path.relpath(first_file), BasicAuthDetector.secret_type, 2): None,
+            (os.path.relpath(first_file), BasicAuthDetector.secret_type, 3): True,
+            (os.path.relpath(second_file), JwtTokenDetector.secret_type, 1): True,
+            (os.path.relpath(second_file), BasicAuthDetector.secret_type, 1): False,
+            (os.path.relpath(second_file), BasicAuthDetector.secret_type, 2): False,
+            (os.path.relpath(third_file), AWSKeyDetector.secret_type, 1): True,
         }
         for item in secrets:
             _, secret = item

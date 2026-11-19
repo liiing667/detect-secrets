@@ -47,7 +47,7 @@ def test_success(parser):
                 'name': 'Base64HighEntropyString',
             },
         ],
-        'results': [],
+        'results': {},
     }
 
     with _mock_file(json.dumps(baseline)) as filename:

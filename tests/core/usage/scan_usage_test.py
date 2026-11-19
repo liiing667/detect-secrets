@@ -24,7 +24,7 @@ def test_force_use_all_plugins(parser):
                         'name': 'AWSKeyDetector',
                     },
                 ],
-                'results': [],
+                'results': {},
             }).encode(),
         )
         f.seek(0)

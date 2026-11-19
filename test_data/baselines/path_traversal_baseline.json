@@ -1,0 +1,14 @@
+{
+  "version": "1.5.0",
+  "plugins_used": [],
+  "results": {
+    "../../etc/passwd": [
+      {
+        "type": "AWS Access Key",
+        "hashed_secret": "0000000000000000000000000000000000000000",
+        "is_verified": false,
+        "line_number": 1
+      }
+    ]
+  }
+}

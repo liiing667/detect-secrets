@@ -8,6 +8,21 @@ class InvalidBaselineError(ValueError):
     pass
 
 
+class BaselineSizeExceededError(UnableToReadBaselineError):
+    """Raised when a baseline file is larger than the permitted maximum size."""
+    pass
+
+
+class DuplicateKeyError(InvalidBaselineError):
+    """Raised when a baseline document contains duplicate JSON keys."""
+    pass
+
+
+class PathTraversalError(InvalidBaselineError):
+    """Raised when a baseline references a path that escapes the working directory."""
+    pass
+
+
 class InvalidFile(ValueError):
     """Think of this as a 400, if FileNotFoundError was a 404 HTTPError code."""
     pass

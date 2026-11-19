@@ -1,4 +1,3 @@
-import json
 from contextlib import contextmanager
 from functools import lru_cache
 from typing import Callable
@@ -15,6 +14,7 @@ from ..core.secrets_collection import SecretsCollection
 from ..exceptions import InvalidBaselineError
 from ..exceptions import NoLineNumberError
 from ..exceptions import SecretNotFoundOnSpecifiedLineError
+from ..exceptions import UnableToReadBaselineError
 from ..plugins.base import BasePlugin
 from ..transformers import get_transformed_file
 from ..types import NamedIO
@@ -29,10 +29,10 @@ def get_baseline_from_file(filename: str) -> SecretsCollection:
     try:
         # TODO: Should we upgrade this?
         return baseline.load(baseline.load_from_file(filename), filename)
-    except (IOError, json.decoder.JSONDecodeError):
+    except UnableToReadBaselineError:
         io.print_error('Not a valid baseline file!')
         raise InvalidBaselineError
-    except KeyError:
+    except InvalidBaselineError:
         io.print_error('Not a valid baseline file!')
         raise InvalidBaselineError
 

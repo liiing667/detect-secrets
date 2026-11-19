@@ -1,6 +1,7 @@
 import argparse
 
 from .. import baseline
+from ...exceptions import InvalidBaselineError
 from ...exceptions import UnableToReadBaselineError
 from .common import initialize_plugin_settings
 from .common import valid_path
@@ -22,12 +23,12 @@ def parse_args(args: argparse.Namespace) -> None:
 
     try:
         loaded_baseline = baseline.load_from_file(args.baseline[0])
-    except UnableToReadBaselineError:
+    except (UnableToReadBaselineError, InvalidBaselineError):
         raise argparse.ArgumentTypeError('Unable to read baseline.')
 
     try:
         args.baseline_filename = args.baseline[0]
         args.baseline_version = loaded_baseline['version']
         args.baseline = baseline.load(loaded_baseline, filename=args.baseline_filename)
-    except KeyError:
+    except InvalidBaselineError:
         raise argparse.ArgumentTypeError('Invalid baseline.')
