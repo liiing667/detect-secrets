@@ -24,6 +24,7 @@ from ..util.path import get_relative_path
 from .log import log
 from .plugins import Plugin
 from .potential_secret import PotentialSecret
+from .secret_binding import is_secret_bound_to_line
 
 
 def get_files_to_scan(
@@ -376,6 +377,15 @@ def _scan_line(
     yield from (
         secret
         for secret in secrets
+        # Defense in depth: even a plugin that overrides `analyze_line` directly (bypassing
+        # `BasePlugin`'s construction) must prove its output belongs to the line it was given.
+        # Cross-line or forged findings fail closed and produce no result.
+        if is_secret_bound_to_line(
+            secret=secret,
+            expected_filename=filename,
+            expected_line_number=line_number,
+            expected_line=line,
+        )
         if not _is_filtered_out(
             required_filter_parameters=['secret'],
             filename=secret.filename,

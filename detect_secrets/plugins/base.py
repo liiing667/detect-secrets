@@ -20,6 +20,7 @@ import requests
 
 from ..constants import VerifiedResult
 from ..core.potential_secret import PotentialSecret
+from ..core.secret_binding import is_secret_bound_to_line
 from ..settings import get_settings
 from detect_secrets.util.code_snippet import CodeSnippet
 from detect_secrets.util.inject import call_function_with_arguments
@@ -52,7 +53,7 @@ class BasePlugin(metaclass=ABCMeta):
         **kwargs: Any
     ) -> Set[PotentialSecret]:
         """This examines a line and finds all possible secret values in it."""
-        output = set()
+        output: Set[PotentialSecret] = set()
         for match in self.analyze_string(line, **kwargs):
             is_verified: bool = False
             # If the filter is disabled it means --no-verify flag was passed
@@ -71,16 +72,27 @@ class BasePlugin(metaclass=ABCMeta):
                 except requests.exceptions.RequestException:
                     is_verified = False
 
-            output.add(
-                PotentialSecret(
-                    type=self.secret_type,
-                    filename=filename,
-                    secret=match,
-                    line_number=line_number,
-                    is_verified=is_verified,
-                ),
+            secret = PotentialSecret(
+                type=self.secret_type,
+                filename=filename,
+                secret=match,
+                line_number=line_number,
+                is_verified=is_verified,
             )
 
+            # Fail closed: the plugin output, the raw line content, and the hash must jointly
+            # prove the finding's identity. A value attached to a line that doesn't contain
+            # it (cross-line bug or forged plugin output) is discarded instead of misleading
+            # auditors with a line number pointing at unrelated code.
+            if not is_secret_bound_to_line(
+                secret=secret,
+                expected_filename=filename,
+                expected_line_number=line_number,
+                expected_line=line,
+            ):
+                continue
+
+            output.add(secret)
         return output
 
     def verify(self, secret: str) -> VerifiedResult:
