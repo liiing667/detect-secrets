@@ -1,0 +1,118 @@
+"""Module declaring a command execution request."""
+
+from __future__ import annotations
+
+import sys
+from enum import Enum
+from pathlib import Path
+from typing import TYPE_CHECKING, Final
+
+from tox.util.redact import redact_argv
+from tox.util.typing_compat import override
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+
+class StdinSource(Enum):
+    """Where the standard input of a command comes from."""
+
+    OFF = 0  #: input disabled
+    USER = 1  #: input via the standard input
+    API = 2  #: input via programmatic access
+
+    @staticmethod
+    def user_only() -> StdinSource:
+        """:returns: ``USER`` if the standard input is tty type else ``OFF``"""
+        return StdinSource.USER if sys.stdin.isatty() else StdinSource.OFF
+
+
+class ExecuteRequest:
+    """Defines a commands execution request."""
+
+    def __init__(  # ruff:ignore[too-many-arguments]  # public signature
+        self,
+        cmd: Sequence[str | Path],
+        cwd: Path,
+        env: dict[str, str],
+        stdin: StdinSource,
+        run_id: str,
+        allow: list[str] | None = None,
+        *,
+        capture: bool = False,
+    ) -> None:
+        """Create a new execution request.
+
+        :param cmd: the command to run
+        :param cwd: the current working directory
+        :param env: the environment variables
+        :param stdin: the type of standard input allowed
+        :param run_id: an id to identify this run
+        :param allow: executable allowlist, or ``None`` to allow any command
+        :param capture: capture output even when no-capture mode is enabled
+
+        :raises ValueError: if the command is empty
+
+        """
+        if len(cmd) == 0:
+            msg = "cannot execute an empty command"
+            raise ValueError(msg)
+        self.cmd: list[str] = [str(i) for i in cmd]  #: the command to run
+        self.cwd = cwd  #: the working directory to use
+        self.env = env  #: the environment variables to use
+        self.stdin = stdin  #: the type of standard input interaction allowed
+        self.run_id = run_id  #: an id to identify this run
+        self.capture = capture
+        if allow is not None and "*" in allow:
+            allow = None  # if we allow everything we can just disable the check
+        self.allow = allow
+
+    @override
+    def __repr__(self) -> str:
+        cmd: Final = redact_argv(self.cmd)
+        return f"{self.__class__.__name__}(cmd={cmd!r}, cwd={self.cwd!r}, env=..., stdin={self.stdin!r})"
+
+    @property
+    def shell_cmd(self) -> str:
+        """The command to run as a shell command."""
+        return self._shell_cmd(redact=False)
+
+    def _shell_cmd(self, *, redact: bool) -> str:
+        try:
+            exe = str(Path(self.cmd[0]).relative_to(self.cwd))
+        except ValueError:
+            exe = self.cmd[0]
+        cmd = [exe, *self.cmd[1:]]
+        if redact:
+            cmd = redact_argv(cmd)
+        return shell_cmd(cmd)
+
+    @property
+    def shell_cmd_redacted(self) -> str:
+        """The command with URL userinfo and secret-looking inline flag values masked."""
+        return self._shell_cmd(redact=True)
+
+
+def shell_cmd(cmd: Sequence[str]) -> str:
+    """Convert a command to the string a shell runs.
+
+    :param cmd: the command and its arguments
+
+    :returns: the command as a single string
+
+    """
+    if sys.platform == "win32":  # pragma: win32 cover
+        from subprocess import list2cmdline  # ruff:ignore[import-outside-top-level]  # Windows quoting
+
+        return list2cmdline(tuple(str(x) for x in cmd))
+    # pragma: win32 no cover
+    from shlex import quote as shlex_quote  # ruff:ignore[import-outside-top-level]  # POSIX quoting
+
+    return " ".join(shlex_quote(str(x)) for x in cmd)
+
+
+__all__ = [
+    "ExecuteRequest",
+    "StdinSource",
+    "shell_cmd",
+]

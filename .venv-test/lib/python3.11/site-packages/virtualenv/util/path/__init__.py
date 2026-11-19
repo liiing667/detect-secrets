@@ -1,0 +1,24 @@
+from __future__ import annotations
+
+__lazy_modules__ = [
+    f"{__spec__.parent}._permission",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
+    f"{__spec__.parent}._sync",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
+    f"{__spec__.parent}._win",  # ty: ignore[missing-union-attribute]  # imported modules have a spec
+]
+
+from ._permission import make_exe, set_tree
+from ._sync import copy, ensure_dir, ensure_within, remove_file, safe_delete, symlink, write_file
+from ._win import get_short_path_name
+
+__all__ = [
+    "copy",
+    "ensure_dir",
+    "ensure_within",
+    "get_short_path_name",
+    "make_exe",
+    "remove_file",
+    "safe_delete",
+    "set_tree",
+    "symlink",
+    "write_file",
+]

@@ -1,0 +1,63 @@
+"""Execute a command in a tox environment."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from tox.config.loader.memory import MemoryLoader
+from tox.config.types import Command
+from tox.plugin import impl
+from tox.report import HandledError
+from tox.session.env_select import CliEnv, register_env_select_flags
+
+from .run.common import env_run_create_flags
+from .run.sequential import run_sequential
+
+if TYPE_CHECKING:
+    from tox.config.cli.parser import ToxParser
+    from tox.session.state import State
+
+
+@impl
+def tox_add_option(parser: ToxParser) -> None:
+    """Add the ``exec`` sub-command to the command line parser.
+
+    :param parser: the parser to add the sub-command to
+
+    """
+    our = parser.add_command("exec", ["e"], "execute an arbitrary command within a tox environment", exec_)
+    our.epilog = "For example: tox exec -e py39 -- python --version"
+    register_env_select_flags(our, default=CliEnv("py"), multiple=False)
+    env_run_create_flags(our, mode="exec")
+
+
+def exec_(state: State) -> int:
+    """Run a command in the selected environment, without output capture.
+
+    :param state: the state of the run
+
+    :returns: the exit code
+
+    :raises tox.report.HandledError: when not exactly one environment is selected
+
+    """
+    state.conf.options.skip_pkg_install = True  # avoid package install
+    state.conf.options.no_capture = True  # always run interactively without output capture
+    envs = list(state.envs.iter())
+    if len(envs) != 1:
+        msg = f"exactly one target environment allowed in exec mode but found {', '.join(envs)}"
+        raise HandledError(msg)
+    loader = MemoryLoader(  # these configuration values are loaded from in-memory always (no file conf)
+        commands_pre=[],
+        commands=[],
+        commands_post=[],
+    )
+    conf = state.envs[envs[0]].conf
+    conf.loaders.insert(0, loader)
+    pos_args = state.conf.pos_args(conf.get("change_dir", Path) if conf["args_are_paths"] else None, program_first=True)
+    if not pos_args:
+        msg = "You must specify a command as positional arguments, use -- <command>"
+        raise HandledError(msg)
+    loader.raw["commands"] = [Command(list(pos_args))]
+    return run_sequential(state)

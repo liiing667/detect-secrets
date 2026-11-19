@@ -1,0 +1,175 @@
+"""A executor that reuses a single subprocess for all backend calls (saving on python startup/import overhead)."""
+
+from __future__ import annotations
+
+import time
+from subprocess import TimeoutExpired
+from threading import Lock
+from typing import TYPE_CHECKING
+
+from pyproject_api import BackendFailed
+
+from tox.util.typing_compat import override
+
+from . import ExecuteRequest
+from .api import Execute, ExecuteInstance, ExecuteOptions, ExecuteStatus
+from .local_sub_process import LocalSubProcessExecuteInstance
+from .request import StdinSource
+from .stream import SyncWrite
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+    from types import TracebackType
+
+
+class LocalSubProcessPep517Executor(Execute):
+    """Executor holding the backend process.
+
+    :param colored: whether the output is colored
+    :param cmd: the command that starts the backend
+    :param env: the environment variables the backend runs with
+    :param cwd: the directory the backend runs in
+
+    :var is_alive: whether the backend process has started
+
+    """
+
+    def __init__(  # keeps the signature
+        self,
+        colored: bool,  # ruff:ignore[boolean-type-hint-positional-argument]  # keeps the signature
+        cmd: Sequence[str],
+        env: dict[str, str],
+        cwd: Path,  # keeps the signature
+    ) -> None:
+        super().__init__(colored)
+        self.cmd = cmd
+        self.env = env
+        self.cwd = cwd
+        self._local_execute: tuple[LocalSubProcessExecuteInstance, ExecuteStatus] | None = None
+        self._exc: Exception | None = None
+        self.is_alive: bool = False
+
+    @override
+    def build_instance(
+        self,
+        request: ExecuteRequest,
+        options: ExecuteOptions,
+        out: SyncWrite,
+        err: SyncWrite,
+    ) -> ExecuteInstance:
+        return _LocalSubProcessPep517ExecuteInstance(request, options, out, err, self.local_execute(options))
+
+    def local_execute(self, options: ExecuteOptions) -> tuple[LocalSubProcessExecuteInstance, ExecuteStatus]:
+        """Start the backend process, or return the one already started.
+
+        :param options: the options of the execution
+
+        :returns: the instance and the status of the backend process
+
+        """
+        if self._exc is not None:
+            raise self._exc
+        if self._local_execute is None:
+            request = ExecuteRequest(cmd=self.cmd, cwd=self.cwd, env=self.env, stdin=StdinSource.API, run_id="pep517")
+
+            instance = LocalSubProcessExecuteInstance(
+                request=request,
+                options=options,
+                out=SyncWrite(name="pep517-out", target=None, color=None),  # not enabled no need to enter/exit
+                err=SyncWrite(name="pep517-err", target=None, color=None),  # not enabled no need to enter/exit
+                on_exit_drain=False,
+            )
+            status = instance.__enter__()  # ruff:ignore[unnecessary-dunder-call]  # explicit dunder call
+            self._local_execute = instance, status
+            process_exited = instance.process is None  # Popen failed (e.g. ENOENT)
+            while True:
+                if b"started backend " in status.out:
+                    self.is_alive = True
+                    break
+                if b"failed to start backend" in status.err or process_exited:
+                    # avoids an import cycle
+                    from tox.tox_env.python.virtual_env.package.pyproject import (  # ruff:ignore[import-outside-top-level]
+                        ToxBackendFailed,
+                    )
+
+                    failure = BackendFailed(
+                        result={
+                            "code": -5,
+                            "exc_type": "FailedToStart",
+                            "exc_msg": "could not start backend",
+                        },
+                        out=status.out.decode(),
+                        err=status.err.decode(),
+                    )
+                    self._exc = ToxBackendFailed(failure)
+                    raise self._exc
+                if instance.process is not None and instance.process.poll() is not None:
+                    process_exited = True  # give reader threads one more iteration to drain
+                time.sleep(0.01)  # wait a short while for the output to populate
+        return self._local_execute
+
+    @staticmethod
+    def _handler(into: bytearray, content: bytes) -> None:
+        into.extend(content)  # pragma: no cover  # setup not built by tests
+
+    def close(self) -> None:
+        """Stop the backend process, if it is still running."""
+        if self._local_execute is not None:  # pragma: no branch  # other outcome untested
+            execute, _status = self._local_execute
+            # not reached in tests
+            if execute.process is not None and execute.process.returncode is None:  # pragma: no cover
+                try:  # pragma: no cover  # setup not built by tests
+                    execute.process.wait(timeout=0.1)  # pragma: no cover  # setup not built by tests
+                except TimeoutExpired:  # pragma: no cover  # untested error path
+                    execute.process.terminate()  # pragma: no cover  # if does not stop on its own kill it
+            execute.__exit__(None, None, None)
+            self._local_execute = None
+        self.is_alive = False
+
+
+class _LocalSubProcessPep517ExecuteInstance(ExecuteInstance):
+    def __init__(
+        self,
+        request: ExecuteRequest,
+        options: ExecuteOptions,
+        out: SyncWrite,
+        err: SyncWrite,
+        instance_status: tuple[LocalSubProcessExecuteInstance, ExecuteStatus],
+    ) -> None:
+        super().__init__(request, options, out, err)
+        self._instance, self._status = instance_status
+        self._lock = Lock()
+
+    @override
+    def __enter__(self) -> ExecuteStatus:
+        self._lock.acquire()
+        self._swap_out_err()
+        return self._status
+
+    def _swap_out_err(self) -> None:
+        out, err = self._out, self._err
+        # update status to see the newly collected content
+        self._out, self._err = self._instance.set_out_err(out, err)
+        # update the thread out/err
+        self._status.set_out_err(out, err)
+
+    @override
+    def __exit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: TracebackType | None,
+    ) -> None:
+        self._swap_out_err()
+        self._lock.release()
+
+    @property
+    @override
+    def cmd(self) -> Sequence[str]:
+        return self._instance.cmd
+
+
+__all__ = [
+    "LocalSubProcessPep517Executor",
+]

@@ -1,0 +1,78 @@
+from __future__ import annotations
+
+import logging
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+from tox.config.loader.memory import MemoryLoader
+from tox.plugin import impl
+from tox.report import HandledError
+from tox.session.env_select import CliEnv, register_env_select_flags
+from tox.util.venv_redirect import record_venv_redirect
+
+from .run.common import env_run_create_flags
+from .run.sequential import run_sequential
+
+if TYPE_CHECKING:
+    from tox.config.cli.parser import ToxParser
+    from tox.session.state import State
+
+
+@impl
+def tox_add_option(parser: ToxParser) -> None:
+    """Add the ``devenv`` sub-command to the command line parser.
+
+    :param parser: the parser to add the sub-command to
+
+    """
+    help_msg = "sets up a development environment at ENVDIR based on the tox configuration specified "
+    our = parser.add_command("devenv", ["d"], help_msg, devenv)
+    our.add_argument("devenv_path", metavar="path", default=Path("venv"), nargs="?", type=Path)
+    register_env_select_flags(our, default=CliEnv("py"), multiple=False)
+    env_run_create_flags(our, mode="devenv")
+
+
+def devenv(state: State) -> int:
+    """Set up a development environment of the selected environment, at the path given on the command line.
+
+    :param state: the state of the run
+
+    :returns: the exit code
+
+    :raises tox.report.HandledError: when not exactly one target environment is selected
+
+    """
+    opt = state.conf.options
+    opt.devenv_path = opt.devenv_path.absolute()
+    opt.skip_missing_interpreters = False  # the target python must exist
+    opt.no_test = True
+    opt.package_only = False
+    opt.install_pkg = None
+    if opt.env.is_all or len(list(opt.env)) != 1:
+        msg = f"exactly one target environment allowed in devenv mode but found {(', '.join(opt.env) or 'ALL')}"
+        raise HandledError(msg)
+    opt.fail_fast = False
+    opt.skip_pkg_install = False
+    loader = MemoryLoader(  # these configuration values are loaded from in-memory always (no file conf)
+        usedevelop=True,  # dev environments must be of type dev
+        env_dir=opt.devenv_path,  # move it in source
+    )
+    state.conf.memory_seed_loaders[next(iter(opt.env))].append(loader)
+
+    state.envs.ensure_only_run_env_is_active()
+    envs = list(state.envs.iter())
+    if len(envs) != 1:
+        msg = f"exactly one target environment allowed in devenv mode but found {', '.join(envs)}"
+        raise HandledError(msg)
+    result = run_sequential(state)
+    if result == 0:
+        logging.warning("created development environment under %s", opt.devenv_path)
+        if state.conf.core.get_optional("venv_redirect", bool) is not False:
+            # asking for a development environment is the explicit consent PEP 832 wants before replacing a redirect
+            record_venv_redirect(state.conf.core.get("tox_root", Path), opt.devenv_path, lambda _: True)
+    return result
+
+
+__all__ = [
+    "devenv",
+]

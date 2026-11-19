@@ -1,0 +1,73 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING
+
+from tox.util.typing_compat import override
+
+if TYPE_CHECKING:
+    from typing import Self
+
+
+class Section:  # ruff:ignore[eq-without-hash]  # mutable value type
+    """tox configuration section.
+
+    :param prefix: the prefix that groups the keys of the section
+    :param name: the name of the section
+
+    """
+
+    SEP = ":"  #: string used to separate the prefix and the section in the key
+
+    def __init__(self, prefix: str | None, name: str) -> None:
+        self._prefix = prefix
+        self._name = name
+
+    @classmethod
+    def from_key(cls: type[Self], key: str) -> Self:
+        """Create a section from a section key.
+
+        :param key: the section key
+
+        :returns: the constructed section
+
+        """
+        if (sep_at := key.find(cls.SEP)) == -1:
+            prefix, name = None, key
+        else:
+            prefix, name = key[:sep_at], key[sep_at + 1 :]
+        return cls(prefix, name)
+
+    @override
+    def __str__(self) -> str:
+        return self.key
+
+    @property
+    def key(self) -> str:
+        """The section key: the prefix and the name joined by the separator, the prefix left out when unset."""
+        return self.SEP.join(i for i in (self._prefix, self._name) if i is not None)
+
+    @override
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(prefix={self._prefix!r}, name={self._name!r})"
+
+    @override
+    def __eq__(self, other: object) -> bool:
+        return isinstance(other, self.__class__) and (self._prefix, self._name) == (
+            other._prefix,
+            other.name,
+        )
+
+    @property
+    def prefix(self) -> str | None:
+        """The prefix of the section, ``None`` when it has none."""
+        return self._prefix
+
+    @property
+    def name(self) -> str:
+        """The name of the section."""
+        return self._name
+
+
+__all__ = [
+    "Section",
+]

@@ -1,0 +1,210 @@
+"""PEP 723 inline script metadata support — shared logic for any venv backend."""
+
+from __future__ import annotations
+
+import logging
+import re
+import tomllib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, cast
+
+from packaging.requirements import InvalidRequirement, Requirement
+from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.version import Version
+
+from tox.config.types import Command
+from tox.tox_env.errors import Fail
+from tox.tox_env.runner import RunToxEnv
+from tox.util.typing_compat import override
+
+from .api import Python
+from .pip.req_file import PythonDeps
+from .runner import add_skip_missing_interpreters_to_core, add_skip_missing_interpreters_to_env
+
+if TYPE_CHECKING:
+    from tox.config.main import Config
+    from tox.config.of_type import ConfigDynamicDefinition
+    from tox.tox_env.api import ToxEnvCreateArgs
+
+_SCRIPT_METADATA_RE: Final[re.Pattern[str]] = re.compile(
+    r"""
+    (?m)
+    ^[#][ ]///[ ](?P<type>[a-zA-Z0-9-]+)$  # opening: # /// <type>
+    \s                                      # blank line or whitespace
+    (?P<content>                            # TOML content lines:
+        (?:^[#](?:|[ ].*)$\s)*              #   each line starts with # (optionally followed by space + text)
+                                                #   [ ] survives VERBOSE; * admits empty blocks
+    )
+    ^[#][ ]///$                             # closing: # ///
+    """,
+    re.VERBOSE,
+)
+_MAX_SCRIPT_BYTES: Final[int] = 5 * 1024 * 1024  # 5 MiB; PEP 723 metadata blocks are tiny in practice
+
+
+class Pep723Mixin(Python, RunToxEnv):
+    """Mixin providing PEP 723 script metadata support for any venv-backed runner.
+
+    Concrete runners compose this with a venv backend (VirtualEnv, UvVenv, etc.) and RunToxEnv.
+
+    :param create_args: the arguments to create the environment with
+
+    """
+
+    _script_metadata: ScriptMetadata | None
+
+    def __init__(self, create_args: ToxEnvCreateArgs) -> None:
+        self._script_metadata = None
+        super().__init__(create_args)
+
+    @override
+    def register_config(self) -> None:
+        super().register_config()
+        self.conf.add_config(
+            keys=["script"],
+            of_type=str,
+            default="",
+            desc="path to Python script with PEP 723 inline metadata (relative to tox_root)",
+        )
+
+        def default_commands(  # interface signature
+            conf: Config,
+            env_name: str | None,  # ruff:ignore[unused-function-argument]  # interface signature
+        ) -> list[Command]:
+            if script := self.conf["script"]:
+                args = ["python", str(self.core.get("tox_root", Path) / script)]
+                if (pos_args := conf.pos_args(None)) is not None:
+                    args.extend(pos_args)
+                return [Command(args)]
+            return []
+
+        commands_def = cast(  # internal access
+            "ConfigDynamicDefinition[list[Command]]",
+            self.conf._defined["commands"],  # ruff:ignore[private-member-access]  # internal access
+        )
+        commands_def.default = default_commands
+        add_skip_missing_interpreters_to_core(self.core, self.options)
+        add_skip_missing_interpreters_to_env(self.conf, self.core, self.options)
+
+    @override
+    def _setup_env(self) -> None:
+        super()._setup_env()
+        if self._base_python_explicitly_set:
+            msg = "cannot set base_python with virtualenv-pep-723 runner; use requires-python in the script"
+            raise Fail(msg)
+        if self.conf["script"]:
+            self._resolve_script_path()  # validates containment and existence, raises Fail on issue
+        metadata = self._get_script_metadata()
+        if metadata.requires_python:
+            info = self.base_python
+            py_version = Version(f"{info.version_info.major}.{info.version_info.minor}.{info.version_info.micro}")
+            if py_version not in SpecifierSet(metadata.requires_python):
+                msg = f"python {py_version} does not satisfy requires-python {metadata.requires_python!r}"
+                raise Fail(msg)
+        if getattr(self.options, "skip_env_install", False):
+            logging.warning("skip installing dependencies")
+            return
+        dependencies: Final[list[str]] = metadata.dependencies
+        if not isinstance(dependencies, list):
+            msg = f"invalid dependencies {dependencies!r} in {self.conf['script']}: expected a list"
+            raise Fail(msg)
+        for dependency in dependencies:
+            try:
+                Requirement(dependency)
+            except (InvalidRequirement, TypeError) as exc:
+                msg = f"invalid dependency {dependency!r} in {self.conf['script']}: {exc}"
+                raise Fail(msg) from exc
+        if dependencies:
+            requirements: Final[PythonDeps] = PythonDeps(
+                dependencies,
+                self.core.get("tox_root", Path),
+                environment_provider=lambda: self.environment_variables,
+            )
+            self._install(requirements, type(self).__name__, "deps")
+
+    def _resolve_script_path(self) -> Path | None:
+        # Resolve the configured script path and verify it stays inside ``tox_root``.
+        #
+        # :returns: the resolved absolute path if the script exists, ``None`` if no script is configured.
+        #
+        # :raises Fail: if the script escapes ``tox_root`` or does not exist when configured.
+        script = self.conf.get("script", str)
+        if not script:
+            return None
+        tox_root = self.core.get("tox_root", Path)
+        root_resolved = tox_root.resolve()
+        full_path = (tox_root / script).resolve()
+        try:
+            full_path.relative_to(root_resolved)
+        except ValueError as exc:
+            msg = f"script path {script!r} escapes tox_root {tox_root}"
+            raise Fail(msg) from exc
+        if not full_path.is_file():
+            msg = f"script file not found: {tox_root / script}"
+            raise Fail(msg)
+        return full_path
+
+    def _get_script_metadata(self) -> ScriptMetadata:
+        if self._script_metadata is None:
+            full_path = self._resolve_script_path()
+            if full_path is None:
+                self._script_metadata = ScriptMetadata()
+                return self._script_metadata
+            if (size := full_path.stat().st_size) > _MAX_SCRIPT_BYTES:
+                msg = f"script file {full_path} is {size} bytes, exceeds the {_MAX_SCRIPT_BYTES} byte limit"
+                raise Fail(msg)
+            try:
+                # utf-8-sig: a BOM would otherwise hide a metadata block starting on the first line
+                self._script_metadata = _parse_script_metadata(full_path.read_text(encoding="utf-8-sig"))
+            except ValueError as exc:  # config error, not a tox defect - includes TOMLDecodeError
+                msg = f"invalid inline script metadata in {full_path}: {exc}"
+                raise Fail(msg) from exc
+        return self._script_metadata
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class ScriptMetadata:
+    """The metadata of a script, from its inline ``script`` block as defined in PEP 723.
+
+    :param requires_python: the python version the script requires
+    :param dependencies: the dependencies the script requires
+
+    """
+
+    requires_python: str | None = None
+    dependencies: list[str] = field(default_factory=list)
+
+
+def _parse_script_metadata(script: str) -> ScriptMetadata:
+    script_blocks: Final[list[str]] = [
+        match.group("content") for match in _SCRIPT_METADATA_RE.finditer(script) if match.group("type") == "script"
+    ]
+    if len(script_blocks) > 1:
+        msg = "multiple [script] metadata blocks found in script"
+        raise ValueError(msg)
+    if not script_blocks:
+        return ScriptMetadata()
+    metadata = tomllib.loads(
+        "".join(line[2:] if line.startswith("# ") else line[1:] for line in script_blocks[0].splitlines(keepends=True))
+    )
+    requires_python = metadata.get("requires-python")
+    if requires_python is not None:
+        if not isinstance(requires_python, str):
+            msg = f"requires-python must be a string, got {type(requires_python).__name__}"
+            raise ValueError(msg)
+        try:
+            SpecifierSet(requires_python)
+        except InvalidSpecifier as exc:
+            msg = f"invalid requires-python {requires_python!r}: {exc}"
+            raise ValueError(msg) from exc
+    return ScriptMetadata(
+        requires_python=requires_python,
+        dependencies=metadata.get("dependencies", []),
+    )
+
+
+__all__ = [
+    "Pep723Mixin",
+    "ScriptMetadata",
+]

@@ -1,0 +1,57 @@
+"""Provides configuration values from the environment variables."""
+
+from __future__ import annotations
+
+import logging
+import os
+from typing import TYPE_CHECKING, Any, Final
+
+from tox.config.loader.str_convert import StrConvert
+from tox.util.redact import redact_argv
+
+if TYPE_CHECKING:
+    from types import UnionType
+
+_CONVERT: Final[StrConvert] = StrConvert()
+
+
+def get_env_var(
+    key: str,
+    of_type: type[Any] | UnionType,  # simplint: ignore[imprecise-annotation]  # option type varies
+) -> tuple[Any, str] | None:  # simplint: ignore[imprecise-annotation]  # option value varies
+    """Get the environment variable option.
+
+    :param key: the config key requested
+    :param of_type: the type we would like to convert it to
+
+    :returns: the converted value and its origin, or ``None`` if not found
+
+    """
+    key_upper = key.upper()
+    for environ_key in (f"TOX_{key_upper}", f"TOX{key_upper}"):
+        if environ_key in os.environ:
+            value = os.environ[environ_key]
+            origin = getattr(of_type, "__origin__", of_type.__class__)
+            try:
+                if origin is list:
+                    entry_type = of_type.__args__[0]
+                    result = [_CONVERT.to(raw=v, of_type=entry_type, factory=None) for v in value.split(";") if v]
+                else:
+                    result = _CONVERT.to(raw=value, of_type=of_type, factory=None)
+            except Exception as exception:  # ruff:ignore[blind-except]  # failure must not stop run
+                redacted_value = redact_argv([value])[0]
+                logging.warning(
+                    "env var %s=%r cannot be transformed to %r because %s",
+                    environ_key,
+                    redacted_value,
+                    of_type,
+                    repr(exception) if redacted_value == value else type(exception).__name__,
+                )
+            else:
+                return result, f"env var {environ_key}"
+    return None
+
+
+__all__ = [
+    "get_env_var",
+]

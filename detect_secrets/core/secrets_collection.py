@@ -33,7 +33,10 @@ class SecretsCollection:
             rather than scanning a different directory.
         """
         self.data: Dict[str, Set[PotentialSecret]] = defaultdict(set)
-        self.root = root
+        # Canonicalize the root (resolving symlinks and `..`) so that reading a file via
+        # `os.path.join(self.root, filename)` stays consistent with the canonical file
+        # identities and relative paths produced by `get_files_to_scan`.
+        self.root = os.path.realpath(root) if root else ''
 
     @classmethod
     def load_from_baseline(cls, baseline: Dict[str, Any]) -> 'SecretsCollection':

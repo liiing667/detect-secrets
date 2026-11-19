@@ -1,0 +1,172 @@
+"""Sources."""
+
+from __future__ import annotations
+
+from abc import ABC, abstractmethod
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+
+from tox.config.loader.section import Section
+from tox.util.typing_compat import override
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from tox.config.loader.api import Loader, OverrideMap
+    from tox.config.sets import ConfigSet, CoreConfigSet
+    from tox.config.types import FactorGroup
+
+
+class Source(ABC):
+    """Source is able to return a configuration value (for either the core or per environment source).
+
+    :param path: the path of the configuration file
+
+    :var FILENAME: the name of the configuration file
+
+    """
+
+    FILENAME = ""
+
+    def __init__(self, path: Path) -> None:
+        self.path: Path = path  #: the path to the configuration source
+
+    @override
+    def __repr__(self) -> str:
+        return f"{self.__class__.__name__}(path={self.path})"
+
+    def get_loaders(
+        self,
+        section: Section,
+        base: list[str] | None,
+        override_map: OverrideMap,
+        conf: ConfigSet,
+    ) -> Iterator[Loader[Any]]:  # simplint: ignore[imprecise-annotation]  # loaders read raw values of any type
+        """Return a loader that loads settings from a given section name.
+
+        :param section: the section to load
+        :param base: base sections to fallback to
+        :param override_map: a list of overrides to apply
+        :param conf: the config set to use
+
+        :yields: the loaders to use
+
+        """
+        # loaders are built fresh per config set: their parent chain depends on the base sections, and a section can
+        # be redefined with another base (a run env re-created as a package env); the config set is what gets cached
+        section = self.transform_section(section)
+        loader: Loader[Any] | None = self.get_loader(  # simplint: ignore[imprecise-annotation]  # mixed loaders
+            section, override_map
+        )
+        if loader is not None:
+            yield loader
+
+        if base is not None:
+            conf.add_config(
+                keys="base",
+                of_type=list[str],
+                desc="inherit missing keys from these sections",
+                default=base,
+            )
+            for base_section in self.get_base_sections(conf["base"], section):
+                child = loader
+                loader = self.get_loader(base_section, override_map)
+                if loader is None:
+                    loader = child
+                    continue
+                if child is not None:
+                    child.parent = loader
+                yield loader
+
+    @abstractmethod
+    def transform_section(self, section: Section) -> Section:
+        """Transform a section before it is used, for example to add a prefix.
+
+        :param section: the section to transform
+
+        :returns: the transformed section
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_loader(
+        self, section: Section, override_map: OverrideMap
+    ) -> Loader[Any] | None:  # simplint: ignore[imprecise-annotation]  # loaders read raw values of any type
+        """Get the loader that reads the values of a section.
+
+        :param section: the section to read
+        :param override_map: the overrides to apply when reading the section
+
+        :returns: the loader, or ``None`` when the source has no values for the section
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_base_sections(self, base: list[str], in_section: Section) -> Iterator[Section]:
+        """Get the base sections a section inherits from.
+
+        :param base: the names of the base sections
+        :param in_section: the section that inherits from them
+
+        :returns: the base sections
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def sections(self) -> Iterator[Section]:
+        """Return a loader that loads the core configuration values.
+
+        :returns: the core loader from this source
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def envs(self, core_conf: CoreConfigSet) -> Iterator[str]:
+        """:param core_conf: the core configuration set
+
+        :returns: a list of environments defined within this source
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_tox_env_section(self, item: str) -> tuple[Section, list[str], list[str]]:
+        """Get the section of a tox environment.
+
+        :param item: the name of the tox environment
+
+        :returns: the section, followed by the base sections for test and for package environments
+
+        """
+        raise NotImplementedError
+
+    @abstractmethod
+    def get_core_section(self) -> Section:
+        """:returns: the core section"""
+        raise NotImplementedError
+
+
+@runtime_checkable
+class FactorLabelSource(Protocol):
+    """A configuration source that defines factor labels for each environment."""
+
+    def factor_labels(self, env_name: str | None) -> dict[str, FactorGroup]:
+        """Get the factor labels defined for an environment.
+
+        :param env_name: the environment name, ``None`` for the core configuration
+
+        :returns: the factor labels
+
+        """
+        ...
+
+
+__all__ = [
+    "FactorLabelSource",
+    "Section",
+    "Source",
+]

@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+import tomllib
+from typing import TYPE_CHECKING
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+from .virtual_env.package.util import dependencies_with_extras_from_markers
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+
+def resolve_extras_static(root: Path, extras: set[str]) -> list[Requirement] | None:
+    """Resolve the requirements of the extras of the project, when they are listed statically.
+
+    :param root: the directory with the ``pyproject.toml`` file
+    :param extras: the names of the extras
+
+    :returns: the requirements, or ``None`` when they cannot be read statically
+
+    """
+    pyproject_file = root / "pyproject.toml"
+    if not pyproject_file.exists():
+        return None
+    pyproject = tomllib.loads(pyproject_file.read_text(encoding="utf-8-sig"))
+    if "project" not in pyproject:
+        return None
+    project = pyproject["project"]
+    for dynamic in project.get("dynamic", []):
+        if dynamic == "dependencies" or (extras and dynamic == "optional-dependencies"):
+            return None
+    deps_with_markers: list[tuple[Requirement, set[str | None]]] = [
+        (Requirement(i), {None}) for i in project.get("dependencies", [])
+    ]
+    optional_deps = project.get("optional-dependencies", {})
+    for extra, reqs in optional_deps.items():
+        deps_with_markers.extend((Requirement(req), {canonicalize_name(extra)}) for req in (reqs or []))
+    return dependencies_with_extras_from_markers(
+        deps_with_markers=deps_with_markers,
+        extras=extras,
+        package_name=project.get("name", "."),
+        available_extras=set(optional_deps.keys()),
+    )
+
+
+__all__ = [
+    "resolve_extras_static",
+]

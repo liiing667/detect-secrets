@@ -54,8 +54,7 @@ def get_files_to_scan(
 
     :param root: if not specified, will assume current repository as root.
     """
-    if root:
-        root = os.path.realpath(root)
+    root = os.path.realpath(root or os.getcwd())
 
     # First, we determine the appropriate filtering mode to be used.
     # If this is True, then it will consider everything to be valid.
@@ -82,28 +81,89 @@ def get_files_to_scan(
         yield from []
         return
 
+    # Canonical paths of files already yielded. This ensures a single on-disk file can only be
+    # scanned once, even when it is reachable through multiple paths (e.g. via a symlink or
+    # non-normalized paths containing `..`).
+    scanned_files: Set[str] = set()
+
     for path in paths:
-        iterator = (
-            cast(List[Tuple], [(root or os.getcwd(), None, [path])])
-            if os.path.isfile(path)
-            else os.walk(path)
-        )
+        if os.path.isdir(path):
+            iterator = _walk_files(path, root)
+        else:
+            iterator = _iter_explicit_file(path, root)
 
-        for path_root, _, filenames in iterator:
-            for filename in filenames:
-                relative_path = get_relative_path(
-                    root=root or os.getcwd(),
-                    path=os.path.join(path_root, filename),
+        for relative_path, canonical_path in iterator:
+            if canonical_path in scanned_files:
+                log.info(f'Skipping "{relative_path}": already scanned under a different path.')
+                continue
+
+            if valid_paths is not True and relative_path not in valid_paths:
+                continue
+
+            scanned_files.add(canonical_path)
+            yield relative_path
+
+
+def _walk_files(
+    directory: str,
+    root: str,
+) -> Generator[Tuple[str, str], None, None]:
+    """Yields ``(relative_path, canonical_path)`` pairs for files under ``directory``.
+
+    Symlinked directories are not followed, so a scan cannot leave the requested scope.
+    Every discovered entry is checked against ``root`` via its canonical path: entries that
+    resolve outside the workspace, or that cannot be resolved, are skipped (with an
+    explanatory log line) rather than being yielded.
+    """
+    for path_root, subdirectories, filenames in os.walk(directory):
+        for subdirectory in subdirectories[:]:
+            if os.path.islink(os.path.join(path_root, subdirectory)):
+                log.info(
+                    f'Skipping "{os.path.join(path_root, subdirectory)}": '
+                    'symlinked directories are not followed.',
                 )
-                if not relative_path:
-                    # e.g. symbolic links may be pointing outside the root directory
-                    continue
+                subdirectories.remove(subdirectory)
 
-                if (
-                    valid_paths is True
-                    or relative_path in valid_paths
-                ):
-                    yield relative_path
+        for filename in filenames:
+            yield from _resolve_candidate(os.path.join(path_root, filename), root)
+
+
+def _iter_explicit_file(
+    path: str,
+    root: str,
+) -> Generator[Tuple[str, str], None, None]:
+    """Yields the ``(relative_path, canonical_path)`` pair for an explicitly named file.
+
+    Explicitly named files keep being scanned directly (per the Principle of Least Surprise),
+    as long as they resolve to a regular file inside ``root``. Missing files and targets that
+    escape the workspace are skipped rather than reported.
+    """
+    if not os.path.isfile(path):
+        log.info(f'Skipping "{path}": not a readable file.')
+        return
+
+    yield from _resolve_candidate(path, root)
+
+
+def _resolve_candidate(
+    path: str,
+    root: str,
+) -> Generator[Tuple[str, str], None, None]:
+    # `realpath` on a dangling symlink returns the (non-existent) resolved path, so an
+    # explicit existence check is needed to reject targets we cannot read.
+    if not os.path.exists(path):
+        log.info(f'Skipping "{path}": target cannot be resolved or read.')
+        return
+
+    canonical_path = os.path.realpath(path)
+    relative_path = get_relative_path(root, canonical_path)
+    if not relative_path:
+        log.info(
+            f'Skipping "{path}": resolves outside of the scan root "{root}".',
+        )
+        return
+
+    yield relative_path, canonical_path
 
 
 def scan_line(line: str) -> Generator[PotentialSecret, None, None]:

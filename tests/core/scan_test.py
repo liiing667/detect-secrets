@@ -72,6 +72,183 @@ class TestGetFilesToScan:
             yield f
 
 
+@pytest.mark.skipif(os.name == 'nt', reason='symlink semantics differ on Windows')
+class TestGetFilesToScanSymlinksAndBoundaries:
+    @staticmethod
+    @pytest.fixture()
+    def workspace(tmp_path, monkeypatch):
+        """
+        Fixed directory layout used to exercise file identity, relative root paths and read
+        boundaries in a single place::
+
+            workspace/
+            ├── real_file.txt           # regular file (scanned)
+            ├── link_to_real.txt         # symlink -> real_file.txt (duplicate identity)
+            ├── link_outside.txt         # symlink -> ../outside.txt (outside the root)
+            ├── broken_link.txt          # dangling symlink (cannot be resolved)
+            ├── real_dir/
+            │   └── nested.txt           # regular nested file (scanned)
+            └── link_dir                 # symlink -> ../outside_dir (directory, not followed)
+
+            outside_dir/outside_nested.txt
+            outside.txt
+        """
+        workspace = tmp_path / 'workspace'
+        workspace.mkdir()
+
+        real_file = workspace / 'real_file.txt'
+        real_file.write_text('nothing to see here')
+
+        nested_dir = workspace / 'real_dir'
+        nested_dir.mkdir()
+        nested_file = nested_dir / 'nested.txt'
+        nested_file.write_text('nothing to see here')
+
+        inside_link = workspace / 'link_to_real.txt'
+        inside_link.symlink_to(real_file)
+
+        outside_file = tmp_path / 'outside.txt'
+        outside_file.write_text('nothing to see here')
+        outside_link = workspace / 'link_outside.txt'
+        outside_link.symlink_to(outside_file)
+
+        broken_link = workspace / 'broken_link.txt'
+        broken_link.symlink_to(tmp_path / 'does_not_exist.txt')
+
+        outside_dir = tmp_path / 'outside_dir'
+        outside_dir.mkdir()
+        (outside_dir / 'outside_nested.txt').write_text('nothing to see here')
+        directory_link = workspace / 'link_dir'
+        directory_link.symlink_to(outside_dir, target_is_directory=True)
+
+        monkeypatch.chdir(tmp_path)
+        return {
+            'root': str(workspace),
+            'expected': {
+                'real_file.txt',
+                os.path.join('real_dir', 'nested.txt'),
+            },
+            'inside_link': str(inside_link),
+            'outside_link': str(outside_link),
+            'broken_link': str(broken_link),
+            'directory_link': str(directory_link),
+            'outside_file': str(outside_file),
+        }
+
+    @staticmethod
+    def test_directory_scan_lists_entered_and_skipped_entries(workspace, mock_log):
+        results = set(
+            scan.get_files_to_scan(
+                workspace['root'],
+                should_scan_all_files=True,
+                root=workspace['root'],
+            ),
+        )
+
+        assert results == workspace['expected']
+
+        # Entered: regular files are scanned under their canonical relative path.
+        assert 'real_file.txt' in results
+        assert os.path.join('real_dir', 'nested.txt') in results
+
+        # Skipped: the in-workspace symlink collapses onto a file already scanned.
+        assert 'already scanned' in mock_log.info_messages
+        # Skipped: symlinks resolving outside the workspace never produce results.
+        assert 'resolves outside of the scan root' in mock_log.info_messages
+        # Skipped: dangling symlinks cannot be resolved, so they don't produce results.
+        assert 'target cannot be resolved or read' in mock_log.info_messages
+        # Skipped: symlinked directories are not followed.
+        assert 'symlinked directories are not followed' in mock_log.info_messages
+
+    @staticmethod
+    def test_symlink_does_not_create_duplicate_identity(workspace):
+        results = list(
+            scan.get_files_to_scan(
+                workspace['root'],
+                should_scan_all_files=True,
+                root=workspace['root'],
+            ),
+        )
+
+        assert len(results) == len(set(results))
+        assert 'link_to_real.txt' not in results
+
+    @staticmethod
+    def test_non_normalized_paths_share_one_identity(workspace):
+        results = list(
+            scan.get_files_to_scan(
+                os.path.join(workspace['root'], 'real_dir', '..', 'real_dir', 'nested.txt'),
+                should_scan_all_files=True,
+                root=workspace['root'],
+            ),
+        )
+
+        assert results == [os.path.join('real_dir', 'nested.txt')]
+
+    @staticmethod
+    def test_explicit_file_inside_root_is_still_scanned(workspace):
+        results = list(
+            scan.get_files_to_scan(
+                os.path.join(workspace['root'], 'real_file.txt'),
+                should_scan_all_files=True,
+                root=workspace['root'],
+            ),
+        )
+
+        assert results == ['real_file.txt']
+
+    @staticmethod
+    def test_explicit_inside_symlink_resolves_to_canonical_identity(workspace):
+        results = list(
+            scan.get_files_to_scan(
+                workspace['inside_link'],
+                should_scan_all_files=True,
+                root=workspace['root'],
+            ),
+        )
+
+        assert results == ['real_file.txt']
+
+    @staticmethod
+    def test_explicit_file_outside_root_does_not_produce_results(workspace, mock_log):
+        results = list(
+            scan.get_files_to_scan(
+                workspace['outside_file'],
+                should_scan_all_files=True,
+                root=workspace['root'],
+            ),
+        )
+
+        assert results == []
+        assert 'resolves outside of the scan root' in mock_log.info_messages
+
+    @staticmethod
+    def test_missing_explicit_file_does_not_produce_results(workspace, mock_log):
+        results = list(
+            scan.get_files_to_scan(
+                os.path.join(workspace['root'], 'missing.txt'),
+                should_scan_all_files=True,
+                root=workspace['root'],
+            ),
+        )
+
+        assert results == []
+        assert 'not a readable file' in mock_log.info_messages
+
+    @staticmethod
+    def test_custom_root_normalizes_relative_paths(workspace, monkeypatch):
+        monkeypatch.chdir(workspace['root'])
+        results = set(
+            scan.get_files_to_scan(
+                '.',
+                should_scan_all_files=True,
+                root=os.path.join('.', '..', 'workspace'),
+            ),
+        )
+
+        assert results == {'real_file.txt', os.path.join('real_dir', 'nested.txt')}
+
+
 class TestScanFile:
     @staticmethod
     def test_handles_broken_yaml_gracefully():

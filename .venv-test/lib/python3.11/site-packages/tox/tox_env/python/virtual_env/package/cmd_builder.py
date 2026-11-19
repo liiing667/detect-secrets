@@ -1,0 +1,247 @@
+from __future__ import annotations
+
+import glob
+import tarfile
+from abc import ABC
+from functools import cached_property, partial
+from io import TextIOWrapper
+from pathlib import Path
+from typing import TYPE_CHECKING, Final, cast
+from zipfile import BadZipFile, ZipFile
+
+from packaging.requirements import InvalidRequirement, Requirement
+
+from tox.execute import Outcome
+from tox.plugin import impl
+from tox.session.cmd.run.single import run_command_set
+from tox.tox_env.errors import Fail
+from tox.tox_env.python.package import PythonPackageToxEnv, SdistPackage, WheelPackage
+from tox.tox_env.python.pip.req_file import PythonDeps
+from tox.tox_env.python.virtual_env.api import VirtualEnv
+from tox.tox_env.util import add_change_dir_conf, add_commands_conf, add_ignore_errors_conf
+from tox.util.typing_compat import override
+
+from .pyproject import Pep517VirtualEnvPackager
+from .util import dependencies_with_extras, safe_extractall
+
+if TYPE_CHECKING:
+    from collections.abc import Generator, Iterator
+    from importlib.metadata import PackageMetadata
+    from os import PathLike
+    from zipfile import ZipInfo
+
+    from tox.config.sets import EnvConfigSet
+    from tox.tox_env.api import ToxEnvCreateArgs
+    from tox.tox_env.package import Package, PackageToxEnv
+    from tox.tox_env.register import ToxEnvRegister
+    from tox.tox_env.runner import RunToxEnv
+
+from importlib.metadata import Distribution
+
+
+class VenvCmdBuilder(PythonPackageToxEnv, ABC):
+    """The base of the packaging environments that build with a command run in a virtualenv.
+
+    :param create_args: the arguments the environment is created with
+
+    """
+
+    def __init__(self, create_args: ToxEnvCreateArgs) -> None:
+        super().__init__(create_args)
+        self._sdist_meta_tox_env: Pep517VirtualEnvPackager | None = None
+        self._built_package_path: Path | None = None
+
+    @override
+    def register_config(self) -> None:
+        super().register_config()
+        root = self.core["toxinidir"]
+        self.conf.add_config(
+            keys="deps",
+            of_type=PythonDeps,
+            factory=partial(PythonDeps.factory, root, environment_provider=lambda: self.environment_variables),
+            default=PythonDeps("", root),
+            desc="Name of the python dependencies as specified by PEP-440",
+        )
+        add_commands_conf(self.conf)
+        add_change_dir_conf(self.conf, self.core)
+        add_ignore_errors_conf(self.conf)
+        self.conf.add_config(
+            keys=["package_glob"],
+            of_type=str,
+            default=str(Path(glob.escape(str(self.conf["env_tmp_dir"] / "dist"))) / "*"),
+            post_process=self._package_glob_relative_to_tox_root,
+            desc="glob used to find the built package to install",
+        )
+
+    def _package_glob_relative_to_tox_root(self, value: str) -> str:
+        if (path := Path(value)).is_absolute():
+            return str(path)
+        return str(Path(glob.escape(str(self.core["tox_root"]))) / value)
+
+    @override
+    def requires(self) -> PythonDeps:
+        return self.conf.get("deps", PythonDeps)
+
+    @override
+    def load_deps_for_env(self, for_env: EnvConfigSet) -> list[Requirement]:
+        assert self._sdist_meta_tox_env is not None  # ruff:ignore[assert]  # invariant, narrows type
+        return self._sdist_meta_tox_env.load_deps_for_env(for_env)
+
+    @override
+    def perform_packaging(self, for_env: EnvConfigSet) -> list[Package]:
+        if (path := self._built_package_path) is None:
+            path = self._build_package()
+            self._built_package_path = path
+        return self.extract_install_info(for_env, path)
+
+    def _build_package(self) -> Path:
+        self.setup()
+        if (path := getattr(self.options, "install_pkg", None)) is not None:
+            return Path(path)
+        chdir = self.conf.get("change_dir", Path)
+        chdir.mkdir(exist_ok=True, parents=True)
+        if run_command_set(self, "commands", chdir, self.conf.get("ignore_errors", bool), []) != Outcome.OK:
+            msg = "stopping as failed to build package"
+            raise Fail(msg)
+        package_glob = self.conf["package_glob"]
+        found = glob.glob(package_glob)  # ruff:ignore[glob]  # matches user pattern
+        if not found:
+            msg = f"no package found in {package_glob}"
+            raise Fail(msg)
+        if len(found) != 1:
+            msg = f"found more than one package {', '.join(sorted(found))}"
+            raise Fail(msg)
+        return Path(found[0])
+
+    def extract_install_info(self, for_env: EnvConfigSet, path: Path) -> list[Package]:
+        """Extract the packages that the built distribution provides.
+
+        :param for_env: the configuration of the run environment
+        :param path: the path of the built distribution
+
+        :returns: the packages
+
+        :raises tox.tox_env.errors.Fail: when the distribution cannot be read, or contains no package
+
+        """
+        extras = for_env.get("extras", set[str])
+        if path.suffix == ".whl":
+            try:
+                return [self._wheel_package(path, extras)]
+            except (BadZipFile, InvalidRequirement, OSError, UnicodeDecodeError) as exc:
+                wheel_error: Final[str] = f"could not read the metadata of {path}: {exc}"
+                raise Fail(wheel_error) from exc
+        work_dir = self.env_tmp_dir / "sdist-extract"
+        if not work_dir.exists():  # pragma: no branch  # other outcome untested
+            work_dir.mkdir()
+        try:
+            with tarfile.open(str(path), "r:gz") as tar:
+                safe_extractall(tar, work_dir)
+        except (EOFError, OSError, tarfile.TarError) as exc:
+            archive_error: Final[str] = f"could not extract {path}: {exc}"
+            raise Fail(archive_error) from exc
+        # the register run env is guaranteed to be called before this
+        assert self._sdist_meta_tox_env is not None  # ruff:ignore[assert]
+        with self._sdist_meta_tox_env.display_context(self._has_display_suspended):
+            try:
+                self._sdist_meta_tox_env.root = next(work_dir.iterdir())  # contains a single egg info folder
+            except StopIteration as exc:
+                empty_archive_error: Final[str] = f"no files inside {path}"
+                raise Fail(empty_archive_error) from exc
+            deps = self._sdist_meta_tox_env.get_package_dependencies(for_env)
+            name = self._sdist_meta_tox_env.get_package_name(for_env)
+            available = self._sdist_meta_tox_env.get_package_extras(for_env)
+        return [SdistPackage(path, dependencies_with_extras(deps, extras, name, available_extras=available))]
+
+    @staticmethod
+    def _wheel_package(path: Path, extras: set[str]) -> WheelPackage:
+        wheel_dist: Final[_WheelDistribution] = _WheelDistribution(path)
+        metadata: Final[PackageMetadata] = wheel_dist.metadata
+        if "Name" not in metadata:
+            missing_name_error: Final[str] = f"no Name in the metadata of {path}"
+            raise Fail(missing_name_error)
+        deps: Final[list[Requirement]] = dependencies_with_extras(
+            [Requirement(requirement) for requirement in wheel_dist.requires or []],
+            extras,
+            metadata["Name"],
+            available_extras=set(metadata.get_all("Provides-Extra") or []),
+        )
+        return WheelPackage(path, deps)
+
+    @override
+    def register_run_env(self, run_env: RunToxEnv) -> Generator[tuple[str, str], PackageToxEnv, None]:
+        yield from super().register_run_env(run_env)
+        # in case the outcome is a sdist we'll use this to find out its metadata
+        result = yield f"{self.conf.name}_sdist_meta", Pep517VirtualEnvPackager.id()
+        self._sdist_meta_tox_env = cast("Pep517VirtualEnvPackager", result)
+
+    @override
+    def child_pkg_envs(self, run_conf: EnvConfigSet) -> Iterator[PackageToxEnv]:
+        if self._sdist_meta_tox_env is not None:  # pragma: no branch  # other outcome untested
+            yield self._sdist_meta_tox_env
+
+
+class _WheelDistribution(Distribution):
+    def __init__(self, wheel: Path) -> None:
+        self._wheel = wheel
+        self._dist_name: str | None = None
+
+    @cached_property
+    @override
+    def metadata(self) -> PackageMetadata:
+        return super().metadata
+
+    @override
+    def read_text(self, filename: str) -> str | None:
+        member: Final[str] = f"{self.dist_name}/{filename}"
+        with ZipFile(self._wheel) as zip_file:
+            try:
+                info: Final[ZipInfo] = zip_file.getinfo(member)
+            except KeyError:
+                return None
+            limit: Final[int] = 8 * 1024 * 1024
+            if info.file_size > limit:
+                msg: Final[str] = (
+                    f"{member} inside {self._wheel} is {info.file_size} bytes, exceeds the {limit} byte limit"
+                )
+                raise Fail(msg)
+            with TextIOWrapper(zip_file.open(info), encoding="utf-8") as file_handler:
+                return file_handler.read()
+
+    @property
+    def dist_name(self) -> str:
+        if self._dist_name is None:
+            with ZipFile(self._wheel) as zip_file:
+                for name in zip_file.namelist():
+                    root = name.split("/")[0]
+                    if root.endswith(".dist-info"):
+                        self._dist_name = root
+                        break
+                else:
+                    msg = f"no .dist-info inside {self._wheel}"
+                    raise Fail(msg)
+        return self._dist_name
+
+    @override
+    def locate_file(self, path: str | PathLike[str]) -> Path:
+        return self._wheel / path  # pragma: no cover # not used by us, but part of the ABC
+
+
+@impl
+def tox_register_tox_env(register: ToxEnvRegister) -> None:
+    register.add_package_env(VirtualEnvCmdBuilder)
+
+
+class VirtualEnvCmdBuilder(VenvCmdBuilder, VirtualEnv):
+    """A packaging environment that builds with a command run in a virtualenv."""
+
+    @staticmethod
+    @override
+    def id() -> str:
+        return "virtualenv-cmd-builder"
+
+
+__all__ = [
+    "VenvCmdBuilder",
+    "VirtualEnvCmdBuilder",
+]

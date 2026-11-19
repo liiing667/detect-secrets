@@ -1,0 +1,76 @@
+"""Display the version information about tox."""
+
+from __future__ import annotations
+
+import sys
+from argparse import SUPPRESS, Action, ArgumentParser, Namespace
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, cast
+
+import tox
+from tox.plugin import impl
+from tox.plugin.manager import MANAGER
+from tox.util.typing_compat import override
+from tox.version import version
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from tox.config.cli.parser import HelpFormatter, ToxParser
+
+
+@impl
+def tox_add_option(parser: ToxParser) -> None:
+    """Add the ``--version`` flag to the command line parser.
+
+    :param parser: the parser to add the flag to
+
+    """
+
+    class _V(Action):
+        def __init__(self, option_strings: Sequence[str], dest: str = SUPPRESS) -> None:
+            help_msg = "show program's and plugins version number and exit"
+            super().__init__(option_strings=option_strings, dest=dest, nargs=0, help=help_msg, default=SUPPRESS)
+
+        @override
+        def __call__(
+            self,
+            parser: ArgumentParser,
+            namespace: Namespace,
+            values: str | Sequence[Any] | None,
+            option_string: str | None = None,
+        ) -> None:
+            formatter = cast(  # internal access
+                "HelpFormatter",
+                parser._get_formatter(),  # ruff:ignore[private-member-access]  # internal access
+            )
+            formatter.add_raw_text(get_version_info())
+            parser._print_message(  # ruff:ignore[private-member-access]  # internal access
+                formatter.format_help(), sys.stdout
+            )
+            parser.exit()
+
+    parser.add_argument("--version", action=_V)
+
+
+def get_version_info() -> str:
+    """Get the version of tox, with the plugins and the inline plugin module that are registered.
+
+    :returns: the version information, one entry per line
+
+    """
+    out = [f"{version} from {Path(tox.__file__).absolute()}"]
+    if plugin_info := MANAGER.manager.list_plugin_distinfo():
+        out.append("registered plugins:")
+        for module, egg_info in plugin_info:
+            source = getattr(module, "__file__", repr(module))
+            append_fn = getattr(module, "tox_append_version_info", None)
+            info = append_fn() if append_fn is not None else ""
+            with_info = f" {info}" if info else ""
+            out.append(f"    {egg_info.project_name}-{egg_info.version} at {source}{with_info}")
+    if (inline := MANAGER.inline_module) is not None:
+        source = getattr(inline, "__file__", repr(inline))
+        info = inline.tox_append_version_info() if hasattr(inline, "tox_append_version_info") else ""
+        with_info = f" {info}" if info else ""
+        out.append(f"inline plugin: {source}{with_info}")
+    return "\n".join(out)

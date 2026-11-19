@@ -1,0 +1,3 @@
+[tox]
+pip_extensions = tox_pip_extensions
+

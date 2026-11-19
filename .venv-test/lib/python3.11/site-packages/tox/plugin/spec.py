@@ -1,0 +1,144 @@
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Final
+
+import pluggy
+
+from . import NAME
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable
+
+    from tox.config.cli.parser import ToxParser
+    from tox.config.sets import ConfigSet, EnvConfigSet
+    from tox.execute import Outcome
+    from tox.session.state import State
+    from tox.tox_env.api import ToxEnv
+    from tox.tox_env.installer import InstallArguments
+    from tox.tox_env.register import ToxEnvRegister
+
+_SPEC: Final[pluggy.HookspecMarker] = pluggy.HookspecMarker(NAME)
+
+
+@_SPEC
+def tox_register_tox_env(register: ToxEnvRegister) -> None:
+    """Register new tox environment type. You can register:
+
+    - **run environment**: by default this is a local subprocess backed virtualenv Python
+    - **packaging environment**: by default this is a PEP-517 compliant local subprocess backed virtualenv Python
+
+    :param register: a object that can be used to register new tox environment types
+
+    """
+
+
+@_SPEC
+def tox_extend_envs() -> Iterable[str]:
+    """Declare additional environment names.
+
+    .. versionadded:: 4.29.0
+
+    This hook is called without any arguments early in the lifecycle. It is expected to return an iterable of strings
+    with environment names for tox to consider. It can be used to facilitate dynamic creation of additional environments
+    from within tox plugins.
+
+    This is ideal to pair with :func:`tox_add_core_config <tox.plugin.spec.tox_add_core_config>` that has access to
+    ``state.conf.memory_seed_loaders`` allowing to extend it with instances of
+    :class:`tox.config.loader.memory.MemoryLoader` early enough before tox starts caching configuration values sourced
+    elsewhere.
+
+    :returns: the environment names to add
+
+    """
+    return ()
+
+
+@_SPEC
+def tox_add_option(parser: ToxParser) -> None:
+    """Add a command line argument.
+
+    This is the first hook to be called, right after the logging setup and config source discovery.
+
+    :param parser: the command line parser
+
+    """
+
+
+@_SPEC
+def tox_add_core_config(core_conf: ConfigSet, state: State) -> None:
+    """Called when the core configuration is built for a tox environment.
+
+    :param core_conf: the core configuration object
+    :param state: the global tox state object
+
+    """
+
+
+@_SPEC
+def tox_add_env_config(env_conf: EnvConfigSet, state: State) -> None:
+    """Called when configuration is built for a tox environment.
+
+    :param env_conf: the core configuration object
+    :param state: the global tox state object
+
+    """
+
+
+@_SPEC
+def tox_before_run_commands(tox_env: ToxEnv) -> None:
+    """Called before the commands set is executed.
+
+    :param tox_env: the tox environment being executed
+
+    """
+
+
+@_SPEC
+def tox_after_run_commands(tox_env: ToxEnv, exit_code: int, outcomes: list[Outcome]) -> None:
+    """Called after the commands set is executed.
+
+    :param tox_env: the tox environment being executed
+    :param exit_code: exit code of the command
+    :param outcomes: outcome of each command execution
+
+    """
+
+
+@_SPEC
+def tox_on_install(tox_env: ToxEnv, arguments: InstallArguments, section: str, of_type: str) -> None:
+    """Called before executing an installation command.
+
+    .. versionchanged:: 4.59.0
+
+        ``arguments`` is now typed as :data:`InstallArguments <tox.tox_env.installer.InstallArguments>` — the union of
+        argument types tox itself installs; environments provided by plugins may pass their own types.
+
+    :param tox_env: the tox environment where the command runs in
+    :param arguments: installation arguments
+    :param section: section of the installation
+    :param of_type: type of the installation
+
+    """
+
+
+@_SPEC
+def tox_env_teardown(tox_env: ToxEnv) -> None:
+    """Called after a tox environment has been teared down.
+
+    :param tox_env: the tox environment
+
+    """
+
+
+__all__ = [
+    "NAME",
+    "tox_add_core_config",
+    "tox_add_env_config",
+    "tox_add_option",
+    "tox_after_run_commands",
+    "tox_before_run_commands",
+    "tox_env_teardown",
+    "tox_extend_envs",
+    "tox_on_install",
+    "tox_register_tox_env",
+]
