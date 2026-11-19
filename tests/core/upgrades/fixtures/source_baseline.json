@@ -1,0 +1,40 @@
+{
+  "version": "0.14.2",
+  "generated_at": "2020-09-13T20:49:20Z",
+  "plugins_used": [
+    {
+      "base64_limit": 4.5,
+      "name": "Base64HighEntropyString"
+    },
+    {
+      "hex_limit": 3,
+      "name": "HexHighEntropyString"
+    }
+  ],
+  "results": {
+    "config.env": [
+      {
+        "hashed_secret": "513e0a36963ae1e8431c041b744679ee578b7c44",
+        "is_secret": false,
+        "is_verified": false,
+        "line_number": 1,
+        "type": "Base64 High Entropy String"
+      }
+    ],
+    "config.ini": [
+      {
+        "hashed_secret": "b5198bd9fe6726cf064a5b80b6dfe25ab793147f",
+        "is_secret": true,
+        "is_verified": true,
+        "line_number": 2,
+        "type": "Hex High Entropy String"
+      },
+      {
+        "hashed_secret": "b1c6a9a65d292f95c2bb3bc1918eed10f4dabb16",
+        "is_verified": false,
+        "line_number": 10,
+        "type": "Secret Keyword"
+      }
+    ]
+  }
+}

@@ -1,0 +1,13 @@
+{
+  "version": "0.14.2",
+  "plugins_used": [],
+  "results": {
+    "config.env": [
+      {
+        "is_verified": false,
+        "line_number": 1,
+        "type": "Base64 High Entropy String"
+      }
+    ]
+  }
+}

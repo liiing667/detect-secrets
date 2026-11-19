@@ -38,6 +38,25 @@ def test_quit_early_if_bad_baseline():
         main(['test_data/files/file_with_secrets.py', '--baseline', 'does-not-exist'])
 
 
+def test_fails_closed_if_baseline_cannot_be_upgraded():
+    with mock_named_temporary_file() as f:
+        f.write(
+            json.dumps({
+                'version': 'not-a-valid-version',
+                'plugins_used': [],
+                'results': {},
+            }).encode(),
+        )
+        f.seek(0)
+
+        with pytest.raises(SystemExit):
+            main([
+                'test_data/files/file_with_no_secrets.py',
+                '--baseline',
+                f.name,
+            ])
+
+
 def test_quit_if_baseline_is_changed_but_not_staged():
     with mock.patch(
         'detect_secrets.pre_commit_hook.raise_exception_if_baseline_file_is_unstaged',

@@ -35,6 +35,26 @@ def test_invalid_baseline(parser):
         parser.parse_args(['--baseline', filename])
 
 
+@pytest.mark.parametrize(
+        'contents',
+        (
+            {'version': 'not-a-valid-version', 'plugins_used': [], 'results': {}},
+            {
+                'version': '0.14.2',
+                'plugins_used': [],
+                'results': {
+                    'config.env': [
+                        {'is_verified': False, 'type': 'Some Type'},
+                    ],
+                },
+            },
+        ),
+)
+def test_unupgradeable_baseline_fails_closed(parser, contents):
+    with _mock_file(json.dumps(contents)) as filename, pytest.raises(SystemExit):
+        parser.parse_args(['--baseline', filename])
+
+
 def test_success(parser):
     baseline = {
         'version': '0.0.1',

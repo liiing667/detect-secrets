@@ -1,0 +1,76 @@
+{
+  "version": "1.5.0",
+  "generated_at": "2020-09-13T20:49:20Z",
+  "plugins_used": [
+    {
+      "name": "Base64HighEntropyString",
+      "limit": 4.5
+    },
+    {
+      "name": "HexHighEntropyString",
+      "limit": 3
+    }
+  ],
+  "results": {
+    "config.env": [
+      {
+        "hashed_secret": "513e0a36963ae1e8431c041b744679ee578b7c44",
+        "is_secret": false,
+        "is_verified": false,
+        "line_number": 1,
+        "type": "Base64 High Entropy String"
+      }
+    ],
+    "config.ini": [
+      {
+        "hashed_secret": "b5198bd9fe6726cf064a5b80b6dfe25ab793147f",
+        "is_secret": true,
+        "is_verified": true,
+        "line_number": 2,
+        "type": "Hex High Entropy String"
+      },
+      {
+        "hashed_secret": "b1c6a9a65d292f95c2bb3bc1918eed10f4dabb16",
+        "is_verified": false,
+        "line_number": 10,
+        "type": "Secret Keyword"
+      }
+    ]
+  },
+  "filters_used": [
+    {
+      "path": "detect_secrets.filters.allowlist.is_line_allowlisted"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_sequential_string"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_potential_uuid"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_likely_id_string"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_templated_secret"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_prefixed_with_dollar_sign"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_indirect_reference"
+    },
+    {
+      "path": "detect_secrets.filters.common.is_ignored_due_to_verification_policies",
+      "min_level": 2
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_lock_file"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_not_alphanumeric_string"
+    },
+    {
+      "path": "detect_secrets.filters.heuristic.is_swagger_file"
+    }
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "version": "1.5.0",
+  "plugins_used": [
+    {
+      "name": "HexHighEntropyString",
+      "limit": 3
+    }
+  ],
+  "filters_used": [
+    {
+      "path": "detect_secrets.filters.heuristic.is_sequential_string"
+    }
+  ],
+  "results": {
+    "config.env": [
+      {
+        "hashed_secret": "513e0a36963ae1e8431c041b744679ee578b7c44",
+        "is_secret": false,
+        "is_verified": false,
+        "line_number": 1,
+        "type": "Base64 High Entropy String"
+      }
+    ]
+  }
+}
